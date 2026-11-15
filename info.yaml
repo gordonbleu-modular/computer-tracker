@@ -1,0 +1,127 @@
+draft: true
+Name: Workshop Tracker
+short-description: Tracker sequencer with 4 drum synths, 2 CV/gate tracks and a WebMIDI editor.
+Language: C++ (Pico SDK + ComputerCard)
+Creator: Workshop Tracker contributors
+Version: "0.1.0"
+Status: Experimental (untested on hardware)
+date-created: 2026-11-15
+date-updated: 2026-11-15
+license: MIT
+
+tags:
+  - sequencer
+  - tracker
+  - drums
+  - cv
+  - gate
+  - midi
+  - web-editor
+
+summary: |
+  A tracker sequencer with four on-board drum synth voices (Kick, Karplus-Strong pluck, pitched noise, FM metal, modal resonator, snare/clap), a stereo mixer, and two CV/gate tracks for the Workshop System VCOs, whose audio comes back in through the audio inputs. Songs are edited in a browser (Chrome/Edge) over USB-MIDI SysEx and stored in six flash slots; without a computer the card is played from the panel (slots, next part, macros, external clock and reset).
+
+uf2:
+  - path: dist/workshop_tracker.uf2
+    name: Workshop Tracker 0.1.0
+
+panel:
+  inputs:
+    - id: AudioIn1
+      name: VCO 1 in
+      description: Mixer channel 5, with optional VCA following CV/gate track 1
+      type: audio
+    - id: AudioIn2
+      name: VCO 2 in
+      description: Mixer channel 6, with optional VCA following CV/gate track 2
+      type: audio
+    - id: CVIn1
+      name: Transpose
+      description: Transposes both CV tracks, 1 V/oct, quantised to semitones
+      type: cv
+    - id: CVIn2
+      name: Filter mod
+      description: Added to the master filter macro (low-pass to high-pass)
+      type: cv
+    - id: PulseIn1
+      name: Clock
+      description: One rising edge advances one row; replaces the internal clock while patched
+      type: pulse
+    - id: PulseIn2
+      name: Reset
+      description: Back to the song start (or pattern start in pattern mode)
+      type: pulse
+  outputs:
+    - id: AudioOut1
+      name: Mix L
+      description: Stereo mix, left
+      type: audio
+    - id: AudioOut2
+      name: Mix R
+      description: Stereo mix, right
+      type: audio
+    - id: CVOut1
+      name: Pitch 1
+      description: Calibrated 1 V/oct pitch of CV/gate track 1
+      type: cv
+    - id: CVOut2
+      name: Pitch 2
+      description: Calibrated 1 V/oct pitch of CV/gate track 2
+      type: cv
+    - id: PulseOut1
+      name: Gate 1
+      description: Gate of CV/gate track 1
+      type: pulse
+    - id: PulseOut2
+      name: Gate 2
+      description: Gate of CV/gate track 2
+      type: pulse
+
+controls:
+  switch:
+    up:
+      name: Select
+      description: Main = song slot 1-6, X = tempo, Y = swing
+    middle:
+      name: Perform
+      description: Main = decay macro, X = colour macro, Y = master filter
+    down:
+      name: Start / next / stop
+      description: Tap to start or jump to the next part at the end of the pattern; hold 0.8 s to stop
+  knobs:
+    - main:
+        name: Decay / Slot
+        description: Decay macro (Perform) or song slot (Select)
+      x:
+        name: Colour / Tempo
+        description: Param A macro (Perform) or tempo 40-240 BPM (Select)
+      y:
+        name: Filter / Swing
+        description: Master filter LP-HP (Perform) or swing 50-75 % (Select)
+  leds:
+    - display: list
+      items:
+        - id: LED0
+          name: Beat
+          description: Flashes every 4 rows; blinks while a knob waits for pickup. Select page shows slot 1.
+        - id: LED1
+          name: Play
+          description: Dim while playing, blinking while a part change is queued
+        - id: LED2
+          name: Drum 1
+          description: Drum voice 1 hits
+        - id: LED3
+          name: Drum 2
+          description: Drum voice 2 hits
+        - id: LED4
+          name: Drum 3
+          description: Drum voice 3 hits
+        - id: LED5
+          name: Drum 4
+          description: Drum voice 4 hits
+
+host:
+  usb:
+    - name: USB MIDI device
+      role: midi
+      description: Appears as "Workshop Tracker"; the web editor talks to it with SysEx

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%23f0a030%22/%3E%3C/svg%3E">
+  <title>Workshop Tracker — editor</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">WORKSHOP<span>TRACKER</span></div>
+  <div class="group">
+    <button id="btnConnect" class="primary" title="Connect to the Workshop Computer over USB (WebMIDI)">Connect</button>
+    <span id="connState" class="pill off">offline</span>
+    <span id="fwInfo" class="dim"></span>
+  </div>
+  <div class="group transport">
+    <button id="btnPlaySong" title="Play the song from the first entry (Enter)">▶ Song</button>
+    <button id="btnPlayPat" title="Loop the pattern you are editing (Space)">▶ Pattern</button>
+    <button id="btnStop" title="Stop (Space while playing)">■</button>
+    <button id="btnNext" title="Jump to the next song entry at the end of this pattern">⏭ Next</button>
+    <label>BPM <input id="tempo" type="number" min="30" max="300" value="120"></label>
+    <label>Swing <input id="swing" type="range" min="50" max="75" value="50"><output id="swingOut">50%</output></label>
+  </div>
+  <div class="group">
+    <span class="cpu" title="Audio-interrupt load measured on the module (ProcessSample only): average / peak">CPU <b id="cpu">–</b></span>
+    <span id="modeOut" class="dim"></span>
+  </div>
+</header>
+
+<section class="toolbar">
+  <div class="group">
+    <label>Song <input id="songName" maxlength="12" size="12"></label>
+    <label>Slot <select id="slot"></select></label>
+    <button id="btnLoad" title="Load the slot on the module and read it into the editor">Load</button>
+    <button id="btnSave" title="Save the module's song into the slot (flash)">Save to module</button>
+  </div>
+  <div class="group">
+    <button id="btnPull" title="Read the module's current song into the editor">⇩ Read from module</button>
+    <button id="btnPush" title="Send the editor's song to the module (replaces what it plays)">⇧ Send to module</button>
+    <button id="btnNew">New</button>
+    <button id="btnDemo">Demo</button>
+    <button id="btnExport" title="Download the song as a .json file">Export</button>
+    <label class="filebtn">Import<input id="fileImport" type="file" accept=".json,application/json"></label>
+    <button id="btnRestore" title="Restore the song the browser had before connecting" hidden>Restore browser song</button>
+  </div>
+  <div class="group">
+    <label>Octave <select id="octave"></select></label>
+    <label>Step <select id="step"></select></label>
+    <label><input id="editMode" type="checkbox" checked> Edit</label>
+    <label><input id="follow" type="checkbox" checked> Follow</label>
+    <button id="btnHelp">Keys</button>
+  </div>
+</section>
+
+<main class="layout">
+  <aside class="side">
+    <h2>Arrangement</h2>
+    <div id="arrangement"></div>
+    <div class="row">
+      <button id="btnAddEntry">+ entry</button>
+      <button id="btnDelEntry">− last</button>
+    </div>
+    <h2>Pattern</h2>
+    <div class="row">
+      <select id="pattern"></select>
+      <label>Rows <input id="patLen" type="number" min="1" max="64"></label>
+    </div>
+    <div class="row">
+      <button id="btnCopyTrack" title="Copy the current track of this pattern (Ctrl+C)">Copy track</button>
+      <button id="btnPasteTrack" title="Paste into the current track (Ctrl+V)">Paste</button>
+    </div>
+    <div class="row">
+      <button id="btnCopyPat">Copy pattern</button>
+      <button id="btnPastePat">Paste pattern</button>
+      <button id="btnClearPat">Clear</button>
+    </div>
+    <div id="fxHelp" class="fxhelp"></div>
+  </aside>
+
+  <section class="center">
+    <div id="grid" class="grid" tabindex="0" aria-label="Pattern editor"></div>
+  </section>
+
+  <aside class="right">
+    <h2>Voices</h2>
+    <div id="voices"></div>
+    <h2>Mixer</h2>
+    <div id="mixer" class="mixer"></div>
+  </aside>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<dialog id="help">
+  <h3>Keys</h3>
+  <table>
+    <tr><td>Arrows, PgUp/PgDn, Home/End</td><td>move</td></tr>
+    <tr><td>Tab / Shift+Tab</td><td>next / previous track</td></tr>
+    <tr><td>Z S X D C V G B H N J M , L .</td><td>notes (lower octave)</td></tr>
+    <tr><td>Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P</td><td>notes (upper octave)</td></tr>
+    <tr><td>1</td><td>OFF (CV: gate off, drum: choke)</td></tr>
+    <tr><td>0-9 A-F</td><td>hex digits in the velocity and effect value columns</td></tr>
+    <tr><td>A B D G S R P K</td><td>effect letter in the effect column</td></tr>
+    <tr><td>Delete / Backspace</td><td>clear field (whole cell in the note column)</td></tr>
+    <tr><td>- / =</td><td>octave down / up</td></tr>
+    <tr><td>Space</td><td>play pattern / stop</td></tr>
+    <tr><td>Enter</td><td>play song</td></tr>
+    <tr><td>Ctrl+C / Ctrl+V</td><td>copy / paste the track in this pattern</td></tr>
+  </table>
+  <p class="dim">Keys follow the physical US layout, so on a German keyboard the bottom row starts at Y.</p>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<footer class="foot dim">
+  Synths run on the module. This page only edits and controls it. Chrome or Edge over https:// or http://localhost; allow MIDI/SysEx when asked.
+</footer>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
