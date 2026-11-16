@@ -20,13 +20,6 @@ USB.
   part / stop on the Z switch, knob macros, external clock & reset, CV
   modulation.
 
-> **Status: untested on real hardware.** The firmware builds, the engine is
-> covered by host unit tests and a cycle-estimating emulator benchmark, and
-> the editor is tested against the firmware's own protocol code. But nobody
-> has run this UF2 on a Computer yet. See [Known risks](#known-risks).
-
-Deutsch: [README.de.md](README.de.md)
-
 ## Quick start
 
 1. **Flash the card.** Download `workshop_tracker.uf2` (in `dist/` or from
