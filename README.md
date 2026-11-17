@@ -124,32 +124,6 @@ Tempo, swing and macros use soft takeover. Details and LED meanings:
   [docs/CPU_BUDGET.md](docs/CPU_BUDGET.md). The module reports its measured
   load to the editor.
 
-## Building
-
-Firmware (Pico SDK 2.2.0, ARM GCC 14):
-
-```sh
-export PICO_SDK_PATH=/path/to/pico-sdk     # with submodules (TinyUSB)
-cmake -S . -B build -G Ninja -DPICO_BOARD=pico -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-cp build/workshop_tracker.uf2 dist/
-```
-
-Tests:
-
-```sh
-# engine, sequencer, panel, protocol and flash-format unit tests (host g++)
-cmake -S . -B build-host -DBUILD_HOST_TESTS=ON && cmake --build build-host && ./build-host/test_engine
-# JS protocol tests + JS↔C++ cross-check (uses build-host/xcheck from the step above)
-node --test web/test/*.test.mjs
-```
-
-CPU benchmark: see [docs/CPU_BUDGET.md](docs/CPU_BUDGET.md).
-
-CI (`.github/workflows/build.yml`) runs the tests, builds the UF2, attaches it
-to tagged releases and deploys `web/` to GitHub Pages (enable Pages with
-source **GitHub Actions** in the repo settings).
-
 ## Layout
 
 ```
