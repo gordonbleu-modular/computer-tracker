@@ -17,8 +17,8 @@ namespace proto {
 
 constexpr uint8_t kMfr = 0x7D;
 constexpr uint8_t kDevice = 0x54;
-constexpr uint8_t kProtocolVersion = 1;
-constexpr uint8_t kFwMajor = 0, kFwMinor = 1, kFwPatch = 0;
+constexpr uint8_t kProtocolVersion = 2;   // v2: SetMacroMask, Panel report
+constexpr uint8_t kFwMajor = 0, kFwMinor = 2, kFwPatch = 0;
 constexpr int kSlots = 6;
 constexpr int kChunkRows = 16;
 
@@ -40,6 +40,7 @@ enum Cmd : uint8_t {
     SetSwing = 0x1A,     // percent
     SetName = 0x1B,      // 12 ASCII bytes
     SetZeroNote = 0x1C,  // note for 0 V
+    SetMacroMask = 0x1D, // macro (0 decay/Main, 1 colour/X), enabled-voice bits 0..3 (v2)
     SetHeader = 0x1F,    // raw song header (kSongHeaderBytes)
     Transport = 0x20,    // mode(0 stop, 1 song, 2 pattern) arg
     Cue = 0x21,          // entry (song mode) or pattern (pattern mode), at pattern end
@@ -54,6 +55,7 @@ enum Cmd : uint8_t {
     PatternChunk = 0x43,
     DumpEnd = 0x44,
     Status = 0x45,
+    Panel = 0x46,        // knob/macro feedback, on change, max ~30/s (v2)
     Ack = 0x50,          // op status slot
 };
 
@@ -101,6 +103,7 @@ public:
     virtual void request_init(int kind) = 0;
     virtual void info_fields(uint8_t& slot, uint8_t& valid_mask) = 0;
     virtual void pinged() = 0;
+    virtual void hello() {}                                 // editor (re)connected
 };
 
 class Protocol {
@@ -126,7 +129,7 @@ public:
         const int n = len - 1;
         Song& s = *host_.live();
         switch (cmd) {
-        case Hello: send_info(); break;
+        case Hello: send_info(); host_.hello(); break;
         case GetSong: send_song(s); break;
         case Ping: host_.pinged(); break;
         case SetCell:
@@ -187,6 +190,10 @@ public:
         case SetZeroNote:
             if (n != 1 || p[0] > 126) return reject();
             s.cv_zero_note = p[0];
+            break;
+        case SetMacroMask:
+            if (n != 2 || p[0] > MacroColour || p[1] > 0x0F) return reject();
+            s.macro_excl[p[0]] = static_cast<uint8_t>(~p[1] & 0x0F);
             break;
         case SetHeader: {
             if (n != kSongHeaderBytes) return reject();
@@ -306,6 +313,87 @@ inline int build_status(uint8_t* b, const EngineStatus& st, const Song& s, Mixer
     b[i++] = static_cast<uint8_t>(st.swap_count & 0x7F);
     return i;   // 29 bytes
 }
+
+// --- Panel report (v2) -------------------------------------------------------
+// What the module's knobs are doing right now, plus the effective (song value
+// + macro offset) parameter values, so the editor can draw them.
+constexpr int kPanelBytes = 27;   // payload bytes after the command byte
+
+struct PanelView {
+    uint8_t knob7[3];   // reported knob positions 0..127 (with hysteresis)
+};
+
+// Effective value of a drum parameter after the PERFORM macro offset.
+inline int effective_drum(const Song& s, const EngineStatus& st, int v, int param) {
+    const int base = s.drum[v][param];
+    if (param == DpDecay && macro_on(s, MacroDecay, v)) return clampi(base + st.macro[0], 0, 127);
+    if (param == DpA && macro_on(s, MacroColour, v)) return clampi(base + st.macro[1], 0, 127);
+    return base;
+}
+inline int effective_filter(const Song& s, const EngineStatus& st) {
+    return clampi(s.master[MsFilter] - 64 + st.macro[2], -64, 63) + 64;
+}
+
+inline int build_panel(uint8_t* b, const EngineStatus& st, const Song& s, const PanelView& v) {
+    int i = 0;
+    b[i++] = Panel;
+    b[i++] = static_cast<uint8_t>(((st.flags & 16) ? 1 : 0) | (st.down_held ? 2 : 0));
+    for (int k = 0; k < 3; ++k) b[i++] = v.knob7[k] & 0x7F;
+    b[i++] = static_cast<uint8_t>(st.knob_waiting & 7);
+    for (int k = 0; k < 3; ++k) b[i++] = static_cast<uint8_t>(clampi(st.macro[k] + 64, 0, 127));
+    b[i++] = static_cast<uint8_t>(~s.macro_excl[MacroDecay] & 0x0F);
+    b[i++] = static_cast<uint8_t>(~s.macro_excl[MacroColour] & 0x0F);
+    for (int d = 0; d < kDrumTracks; ++d) b[i++] = static_cast<uint8_t>(effective_drum(s, st, d, DpDecay));
+    for (int d = 0; d < kDrumTracks; ++d) b[i++] = static_cast<uint8_t>(effective_drum(s, st, d, DpA));
+    b[i++] = static_cast<uint8_t>(effective_filter(s, st));
+    b[i++] = s.tempo_hi & 0x7F;
+    b[i++] = s.tempo_lo & 0x7F;
+    b[i++] = s.swing & 0x7F;
+    b[i++] = static_cast<uint8_t>(st.slot & 0x7F);
+    b[i++] = static_cast<uint8_t>(st.mode & 0x7F);
+    b[i++] = static_cast<uint8_t>(st.entry & 0x7F);
+    b[i++] = static_cast<uint8_t>(st.pattern & 0x7F);
+    b[i++] = static_cast<uint8_t>(clampi(st.transpose + 64, 0, 127));
+    return i;   // 1 + kPanelBytes
+}
+
+// Decides when to send a Panel report (runs on core 1, never on the audio core):
+// only when something changed, at most every min_gap_us, plus a keep-alive.
+// Knob positions use hysteresis so ADC jitter does not cause a stream.
+class PanelReporter {
+public:
+    static constexpr uint32_t kMinGapUs = 33000;      // ~30 reports/s max
+    static constexpr uint32_t kKeepAliveUs = 1000000; // resend once a second
+    static constexpr int kHyst = 16;                  // of 4095, ~0.4 %
+
+    void force() { force_ = true; }
+
+    // Returns the message length to send (0 = nothing to send now).
+    int poll(uint32_t now_us, const EngineStatus& st, const Song& s, uint8_t* out) {
+        for (int k = 0; k < 3; ++k) {
+            const int raw = st.knob[k];
+            const int centre = view_.knob7[k] * 32 + 16;
+            if (raw > centre + 16 + kHyst || raw < centre - 16 - kHyst || first_)
+                view_.knob7[k] = static_cast<uint8_t>(clampi(raw >> 5, 0, 127));
+        }
+        first_ = false;
+        if (!force_ && now_us - last_us_ < kMinGapUs) return 0;
+        const int len = build_panel(out, st, s, view_);
+        const bool changed = std::memcmp(out, last_, static_cast<size_t>(len)) != 0;
+        if (!changed && !force_ && now_us - last_us_ < kKeepAliveUs) return 0;
+        std::memcpy(last_, out, static_cast<size_t>(len));
+        last_us_ = now_us;
+        force_ = false;
+        return len;
+    }
+
+private:
+    PanelView view_{{64, 64, 64}};
+    uint8_t last_[1 + kPanelBytes] = {};
+    uint32_t last_us_ = 0;
+    bool force_ = true;
+    bool first_ = true;
+};
 
 } // namespace proto
 } // namespace trk

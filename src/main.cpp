@@ -133,7 +133,15 @@ public:
             if (trk::store::slot_valid(flash_ptr(trk::store::slot_offset(kFlashSize, i)))) mask |= static_cast<uint8_t>(1u << i);
     }
 
-    void pinged() override { last_ping_ = time_us_32(); pinged_once_ = true; }
+    void pinged() override {
+        const uint32_t now = time_us_32();
+        if (!pinged_once_ || now - last_ping_ > 3000000u) reporter_.force();   // editor came back
+        last_ping_ = now;
+        pinged_once_ = true;
+    }
+    void hello() override { reporter_.force(); }
+
+    trk::proto::PanelReporter reporter_;
 
     enum class Job { None, Save, Load, Init };
     Job job_ = Job::None;
@@ -288,6 +296,15 @@ void send_status_if_due() {
     g_host.send(buf, len);
 }
 
+// Knob/macro feedback for the editor (only while it pings; on change, <= ~30/s).
+void send_panel_if_due() {
+    const uint32_t now = time_us_32();
+    if (!g_host.pinged_once_ || now - g_host.last_ping_ > 3000000u) return;
+    uint8_t buf[2 + trk::proto::kPanelBytes];
+    const int len = g_host.reporter_.poll(now, g_engine.status(), *g_engine.live(), buf);
+    if (len > 0) g_host.send(buf, len);
+}
+
 void core1_main() {
     tusb_init();
     while (true) {
@@ -301,6 +318,7 @@ void core1_main() {
             }
         }
         send_status_if_due();
+        send_panel_if_due();
     }
 }
 

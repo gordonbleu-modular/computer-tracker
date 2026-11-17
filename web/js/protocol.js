@@ -4,7 +4,7 @@
 
 export const MFR = 0x7d;
 export const DEVICE = 0x54; // 'T'
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2; // v2: SetMacroMask, Panel report
 
 export const K = {
   drumTracks: 4,
@@ -35,7 +35,8 @@ export const OFF = {
   swing: 14,
   songLen: 15,
   cvZero: 16,
-  reserved: 17,
+  macroExcl: 17, // [0] decay macro (Main), [1] colour macro (X): bit set = voice NOT affected
+  reserved: 19,
   patLen: 28,
   entries: 44, // 32 x {pattern, repeats}
   drum: 108, // 4 x 8
@@ -48,10 +49,10 @@ export const CMD = {
   Hello: 0x01, GetSong: 0x02, Ping: 0x09,
   SetCell: 0x10, SetCells: 0x11, SetPatLen: 0x12, SetDrum: 0x13, SetCv: 0x14,
   SetMix: 0x15, SetMaster: 0x16, SetEntry: 0x17, SetSongLen: 0x18, SetTempo: 0x19,
-  SetSwing: 0x1a, SetName: 0x1b, SetZeroNote: 0x1c, SetHeader: 0x1f,
+  SetSwing: 0x1a, SetName: 0x1b, SetZeroNote: 0x1c, SetMacroMask: 0x1d, SetHeader: 0x1f,
   Transport: 0x20, Cue: 0x21, Preview: 0x22, NextPart: 0x23,
   Save: 0x30, Load: 0x31, InitSong: 0x32,
-  Info: 0x41, SongHeader: 0x42, PatternChunk: 0x43, DumpEnd: 0x44, Status: 0x45, Ack: 0x50,
+  Info: 0x41, SongHeader: 0x42, PatternChunk: 0x43, DumpEnd: 0x44, Status: 0x45, Panel: 0x46, Ack: 0x50,
 };
 
 export const ENGINES = [
@@ -148,6 +149,10 @@ export class Song {
   setCv(t, p, x) { this.header[OFF.cv + t * 8 + p] = clamp(x | 0, 0, 127); }
   mix(ch, p) { return this.header[OFF.mix + ch * 8 + p]; }
   setMix(ch, p, x) { this.header[OFF.mix + ch * 8 + p] = clamp(x | 0, 0, 127); }
+  // Macro routing: bits 0..3 = drum voices the macro acts on (m 0 = decay/Main, 1 = colour/X).
+  macroMask(m) { return ~this.header[OFF.macroExcl + m] & 0x0f; }
+  setMacroMask(m, bits) { this.header[OFF.macroExcl + m] = ~bits & 0x0f; }
+  macroOn(m, v) { return !!(this.macroMask(m) & (1 << v)); }
   master(p) { return this.header[OFF.master + p]; }
   setMaster(p, x) { this.header[OFF.master + p] = clamp(x | 0, 0, 127); }
 
@@ -244,6 +249,7 @@ export const msg = {
   setSwing: (v) => frame(CMD.SetSwing, [v]),
   setName: (song) => frame(CMD.SetName, Array.from(song.header.slice(OFF.name, OFF.name + K.nameLen))),
   setZeroNote: (n) => frame(CMD.SetZeroNote, [n]),
+  setMacroMask: (m, bits) => frame(CMD.SetMacroMask, [m, bits & 0x0f]),
   setHeader: (song) => frame(CMD.SetHeader, Array.from(song.header)),
   stop: () => frame(CMD.Transport, [0, 0]),
   playSong: (entry = 0) => frame(CMD.Transport, [1, entry]),
@@ -300,6 +306,19 @@ export function decode(data) {
         hits: p[26], swaps: p[27],
       };
     }
+    case CMD.Panel: {
+      if (p.length < 27) return { type: 'panel', bad: true };
+      return {
+        type: 'panel',
+        selectPage: !!(p[0] & 1), downHeld: !!(p[0] & 2),
+        knobs: [p[1], p[2], p[3]], waiting: [!!(p[4] & 1), !!(p[4] & 2), !!(p[4] & 4)],
+        macros: [p[5] - 64, p[6] - 64, p[7] - 64],
+        masks: [p[8], p[9]],
+        effDecay: Array.from(p.slice(10, 14)), effA: Array.from(p.slice(14, 18)), effFilter: p[18],
+        tempo: p[19] * 128 + p[20], swing: p[21], slot: p[22], mode: p[23], entry: p[24], pattern: p[25],
+        transpose: p[26] - 64,
+      };
+    }
     case CMD.Ack: {
       const ops = { [CMD.Save]: 'save', [CMD.Load]: 'load', [CMD.InitSong]: 'init' };
       return { type: 'ack', op: ops[p[0]] || p[0], status: ['ok', 'empty', 'busy', 'error'][p[1]] || p[1], slot: p[2] };
@@ -308,6 +327,16 @@ export function decode(data) {
       return { type: 'unknown', cmd };
   }
 }
+
+// Effective parameter values while a PERFORM macro is applied (same maths as
+// effective_drum / effective_filter in protocol.h). macros = [decay, colour, filter], -64..63.
+export function effectiveDrum(song, macros, v, param) {
+  const base = song.drum(v, param);
+  if (param === 1 && song.macroOn(0, v)) return clamp(base + macros[0], 0, 127);
+  if (param === 2 && song.macroOn(1, v)) return clamp(base + macros[1], 0, 127);
+  return base;
+}
+export function effectiveFilter(song, macros) { return clamp(song.master(2) - 64 + macros[2], -64, 63) + 64; }
 
 // Assembles a full song from a GetSong dump.
 export class DumpCollector {

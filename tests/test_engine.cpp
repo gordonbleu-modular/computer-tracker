@@ -526,6 +526,118 @@ static void test_engine() {
     CHECK(pk > 300);
 }
 
+
+// ------------------------------------------------------ v2: macros + panel --
+static int64_t voice0_energy(int knob_main, bool route_voice0) {
+    auto a = make_song(false);
+    auto b = make_song(false);
+    a->drum[0][DpEngine] = EngKick;
+    a->drum[0][DpDecay] = 40;
+    if (!route_voice0) a->macro_excl[MacroDecay] = 1;
+    auto eng = std::make_unique<TrackerEngine>();
+    EngineIn in;
+    in.knobs[0] = knob_main;
+    eng->init(a.get(), b.get(), 0, in);
+    EngineOut out;
+    for (int i = 0; i < 64; ++i) eng->process(in, out);
+    eng->commands().push(Command{CmdType::Preview, 0, 48, 100});
+    int64_t e = 0;
+    for (int i = 0; i < kSampleRate * 2; ++i) { eng->process(in, out); e += std::abs(out.audio[0]); }
+    return e;
+}
+
+static void test_macros_v2() {
+    // Decay macro (Main knob) is an offset, applied only to routed voices.
+    const int64_t centre = voice0_energy(2048, true);
+    const int64_t up_routed = voice0_energy(4095, true);
+    const int64_t up_excluded = voice0_energy(4095, false);
+    const int64_t down_routed = voice0_energy(0, true);
+    CHECK(up_excluded == centre);
+    CHECK(up_routed > centre * 3 / 2);
+    CHECK(down_routed < centre);
+    std::printf("  decay macro energy: down %lld centre %lld up %lld (excluded %lld)\n",
+                static_cast<long long>(down_routed), static_cast<long long>(centre),
+                static_cast<long long>(up_routed), static_cast<long long>(up_excluded));
+
+    // Header: old songs (0) route everything; sanitising keeps 4 bits.
+    auto s = make_song(true);
+    for (int v = 0; v < kDrumTracks; ++v) CHECK(macro_on(*s, MacroDecay, v) && macro_on(*s, MacroColour, v));
+    s->macro_excl[0] = 0x7A;
+    header_sanitize(*s);
+    CHECK(s->macro_excl[0] == 0x0A);
+    CHECK(macro_on(*s, MacroDecay, 0) && !macro_on(*s, MacroDecay, 1));
+
+    // SetMacroMask over the protocol (enabled bits on the wire).
+    TestHost h(s.get());
+    proto::Protocol pr(h);
+    auto feed = [&](const std::vector<uint8_t>& v) { pr.feed(v.data(), static_cast<int>(v.size())); };
+    feed(sysex({proto::SetMacroMask, 0, 0x05}));
+    CHECK(s->macro_excl[MacroDecay] == 0x0A);
+    feed(sysex({proto::SetMacroMask, 1, 0x0E}));
+    CHECK(s->macro_excl[MacroColour] == 0x01);
+    const uint32_t rej = pr.rejected();
+    feed(sysex({proto::SetMacroMask, 2, 0x01}));
+    feed(sysex({proto::SetMacroMask, 0, 0x10}));
+    feed(sysex({proto::SetMacroMask, 0}));
+    CHECK(pr.rejected() == rej + 3);
+    feed(sysex({proto::Hello}));
+    CHECK(!h.sent.empty() && h.sent.back()[0] == proto::Info && h.sent.back()[1] == 2);
+
+    // Panel report contents.
+    EngineStatus st;
+    st.flags = 16; st.down_held = 1;
+    st.knob[0] = 4095; st.knob[1] = 0; st.knob[2] = 2048;
+    st.knob_waiting = 2;
+    st.macro[0] = 60; st.macro[1] = -30; st.macro[2] = 20;
+    st.slot = 3; st.mode = 1; st.entry = 2; st.pattern = 5; st.transpose = -7;
+    s->drum[0][DpDecay] = 100; s->drum[1][DpDecay] = 100;
+    s->drum[0][DpA] = 10; s->drum[1][DpA] = 10;
+    s->master[MsFilter] = 64;
+    proto::PanelView pv{{127, 0, 64}};
+    uint8_t b[64];
+    const int n = proto::build_panel(b, st, *s, pv);
+    CHECK(n == 1 + proto::kPanelBytes);
+    CHECK(b[0] == proto::Panel && b[1] == 3);
+    CHECK(b[2] == 127 && b[3] == 0 && b[4] == 64 && b[5] == 2);
+    CHECK(b[6] == 124 && b[7] == 34 && b[8] == 84);
+    CHECK(b[9] == 0x05 && b[10] == 0x0E);
+    CHECK(b[11] == 127 && b[12] == 100);          // voice 0 routed (clamped), voice 1 not
+    CHECK(b[15] == 10 && b[16] == 0);              // colour: voice 0 not routed, voice 1 routed (clamped)
+    CHECK(b[19] == 84);                            // filter 64 + 20
+    CHECK(b[23] == 3 && b[24] == 1 && b[25] == 2 && b[26] == 5 && b[27] == 57);
+    for (int i = 1; i < n; ++i) CHECK(b[i] < 128);
+
+    // Reporter: on change only, rate-limited, jitter-proof, keep-alive.
+    proto::PanelReporter rep;
+    EngineStatus q;
+    uint32_t t = 1000;
+    CHECK(rep.poll(t, q, *s, b) > 0);              // first report is forced
+    CHECK(rep.poll(t + 1000, q, *s, b) == 0);
+    t += 40000;
+    CHECK(rep.poll(t, q, *s, b) == 0);             // nothing changed
+    q.knob[0] = 2048 + 20;                          // ADC jitter
+    t += 40000;
+    CHECK(rep.poll(t, q, *s, b) == 0);
+    q.knob[0] = 3000;
+    CHECK(rep.poll(t + 1000, q, *s, b) > 0 && b[2] == 3000 / 32);
+    t += 1000;
+    q.knob[0] = 1000;
+    CHECK(rep.poll(t + 1000, q, *s, b) == 0);      // changed but too soon after the last report
+    t += 40000;
+    CHECK(rep.poll(t, q, *s, b) > 0 && b[2] == 1000 / 32);
+    int sent = 0;
+    for (int i = 0; i < 100; ++i) {                 // fast sweep: at most ~30/s
+        q.knob[1] = i * 40;
+        t += 2000;
+        if (rep.poll(t, q, *s, b) > 0) ++sent;
+    }
+    CHECK(sent >= 5 && sent <= 7);                  // 200 ms of moving
+    t += 2000000;
+    CHECK(rep.poll(t, q, *s, b) > 0);              // keep-alive
+    rep.force();
+    CHECK(rep.poll(t + 10, q, *s, b) > 0);
+}
+
 int main() {
     test_dsp();
     test_voices();
@@ -538,6 +650,7 @@ int main() {
     test_protocol();
     test_store();
     test_engine();
+    test_macros_v2();
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

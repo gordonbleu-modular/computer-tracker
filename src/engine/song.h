@@ -72,6 +72,8 @@ enum MixParam { MpLevel = 0, MpPan, MpDrive, MpTone, MpVca, MpMute, MpR6, MpR7 }
 // Master parameters.
 enum MasterParam { MsLevel = 0, MsDrive, MsFilter, MsR3, MsR4, MsR5, MsR6, MsR7 };
 
+enum Macro { MacroDecay = 0, MacroColour = 1, MacroFilter = 2 };
+
 struct SongEntry {
     uint8_t pattern;
     uint8_t repeats;   // 1..16
@@ -85,7 +87,10 @@ struct SongHeader {
     uint8_t swing;         // 50..75 %
     uint8_t song_len;      // 1..32 entries
     uint8_t cv_zero_note;  // MIDI note that gives 0 V on the CV outs (default 36 = C2)
-    uint8_t reserved[11];
+    // Panel macro routing (protocol v2). Bit v set = drum voice v is NOT
+    // affected by that macro, so 0 (old songs, v1 flash slots) = all voices.
+    uint8_t macro_excl[2];  // [MacroDecay] = Main knob, [MacroColour] = X knob
+    uint8_t reserved[9];
     uint8_t pat_len[kPatterns];             // 1..64
     SongEntry entries[kSongEntries];
     uint8_t drum[kDrumTracks][kParamsPerVoice];
@@ -101,6 +106,9 @@ struct SongHeader {
         tempo_lo = static_cast<uint8_t>(bpm % 128);
     }
 };
+
+// True when the PERFORM macro m (MacroDecay / MacroColour) acts on drum voice v.
+inline bool macro_on(const SongHeader& s, int m, int v) { return ((s.macro_excl[m] >> v) & 1) == 0; }
 
 struct Song : SongHeader {
     Cell cells[kPatterns][kTracks][kRows];
@@ -127,6 +135,7 @@ inline void header_sanitize(SongHeader& s) {
     if (s.song_len < 1) s.song_len = 1;
     if (s.song_len > kSongEntries) s.song_len = kSongEntries;
     if (s.cv_zero_note > 126) s.cv_zero_note = 36;
+    for (uint8_t& v : s.macro_excl) v &= 0x0F;
     for (uint8_t& v : s.reserved) v = 0;
     for (uint8_t& l : s.pat_len) {
         if (l < 1) l = 1;

@@ -1,4 +1,4 @@
-# Workshop Tracker USB protocol (v1)
+# Workshop Tracker USB protocol (v2)
 
 The card appears as a **USB-MIDI device** called **"Workshop Tracker"**
 (VID `0x2E8A`, PID `0x10C1`). All editor traffic is **SysEx**; no notes or CCs
@@ -18,7 +18,9 @@ Every payload byte is 7-bit (0–127). All song values are designed to fit in
 Reference implementations: `src/engine/protocol.h` (firmware, unit-tested in
 `tests/test_engine.cpp`) and `web/js/protocol.js` (browser). The two are
 cross-checked byte for byte by `web/test/xcheck.test.mjs`. That test feeds the JS
-upload stream through the real C++ parser and reads the song back.
+upload stream through the real C++ parser and reads the song back. It also
+decodes a Panel report built by the C++ code and compares the effective values
+with the JS implementation.
 
 ## Song data model
 
@@ -57,7 +59,8 @@ upload stream through the real C++ parser and reads the song back.
 | 14 | 1 | swing 50–75 (% of the row pair given to the first row) |
 | 15 | 1 | song_len |
 | 16 | 1 | cv_zero_note (MIDI note that outputs 0 V, default 36 = C2) |
-| 17 | 11 | reserved (0) |
+| 17 | 2 | macro_excl[2] (v2): PERFORM macro routing, [0] = decay macro (Main knob), [1] = colour macro (X knob). **Bit v set = drum voice v is *not* affected.** Stored inverted so that 0 (old songs, v1 flash slots) means "all voices". |
+| 19 | 9 | reserved (0) |
 | 28 | 16 | pat_len[16] |
 | 44 | 64 | entries[32] {pattern, repeats} |
 | 108 | 32 | drum[4][8]: engine, decay, A, B, tune (64 = 0), vel-sens, –, – |
@@ -88,6 +91,7 @@ so a buggy or malicious host cannot put the engine in a bad state.
 | 1A | SetSwing | percent |
 | 1B | SetName | 12 ASCII bytes |
 | 1C | SetZeroNote | note |
+| 1D | SetMacroMask | macro (0 = decay/Main, 1 = colour/X), **enabled**-voice bits 0–3 (v2) |
 | 1F | SetHeader | 212 raw header bytes |
 | 20 | Transport | mode (0 stop, 1 song, 2 pattern), arg (entry or pattern) |
 | 21 | Cue | entry (song mode) or pattern (pattern mode); applied at the end of the current pattern |
@@ -110,6 +114,7 @@ pattern picks them up on the next row). Nothing is written to flash until
 | 43 | PatternChunk | pat, track, row0, count, count × 4 cell bytes |
 | 44 | DumpEnd | – |
 | 45 | Status | 28 bytes, see below |
+| 46 | Panel | 27 bytes, knob/macro feedback, see below (v2) |
 | 50 | Ack | op (30/31/32), status (0 ok, 1 empty slot, 2 busy, 3 error), slot |
 
 **Status payload**
@@ -130,6 +135,52 @@ pattern picks them up on the next row). Nothing is written to flash until
 | 26 | drum trigger bits since last status |
 | 27 | song swap counter (7-bit) |
 
+**Panel payload (v2)**
+
+Sent by core 1 only while the editor pings, **only when something changed**,
+at most every 33 ms (~30/s), plus a keep-alive once a second and right after
+Hello. Knob positions are reported with hysteresis so ADC jitter does not
+cause a stream of messages. Building it never touches the audio core: it
+reads the status words core 0 publishes every 64 samples.
+
+| # | Field |
+| --- | --- |
+| 0 | flags: 1 = Z on SELECT page (Up), 2 = Z held down |
+| 1–3 | knob positions Main, X, Y (0–127) |
+| 4 | bit k = knob k is waiting for soft takeover (pickup) |
+| 5–7 | macros decay, colour, filter (+64). The filter macro includes CV in 2. |
+| 8–9 | macro routing: enabled-voice bits for decay (Main) and colour (X) |
+| 10–13 | **effective** decay of drum voices 1–4 (song value + decay macro if routed, clamped 0–127) |
+| 14–17 | **effective** param A of drum voices 1–4 (song value + colour macro if routed) |
+| 18 | **effective** master filter (64 = off) |
+| 19–20 | tempo hi, lo |
+| 21 | swing |
+| 22 | slot |
+| 23–25 | mode, song entry (part), pattern |
+| 26 | CV in 1 transpose in semitones (+64) |
+
+### Macros are offsets
+
+The PERFORM macros (Main = decay, X = colour/param A, Y = master filter) are
+**live offsets** added when a drum is hit (filter: continuously). They are
+**never written into the song**, and saving a slot saves the song values without them.
+The editor draws the song value as the knob position (gold arc) and the
+effective value from the Panel report as a red arc + dot. Tempo, swing and the
+slot selected on the panel's SELECT page *are* song/session changes and are
+synced into the editor's song.
+
+### Compatibility
+
+* The protocol version is the first byte of **Info**. The editor shows a banner
+  for a v1 module ("knob feedback and voice routing need firmware 0.2") and keeps
+  working: everything else in v2 is a superset of v1, and Status is unchanged.
+  On v1 firmware, macros affect all voices, and the editor draws the red arcs
+  that way, using the macros in Status.
+* A v1 module rejects SetMacroMask (unknown command, ignored). A v2 module
+  loads v1 flash slots unchanged (routing bytes are 0 = all voices).
+* Unknown commands are counted and ignored; messages for other devices
+  (`F0 7D` with a different device byte, or other manufacturers) are ignored.
+
 ## Flow
 
 ```
@@ -140,6 +191,7 @@ editor                         card
          ◀─────────────────── SongHeader, PatternChunk × 384, DumpEnd
   Ping (every 500 ms) ──────▶
          ◀─────────────────── Status (every 50 ms)
+         ◀─────────────────── Panel (on change, ≤ 30/s)
   SetCell / SetDrum / … ────▶  (applied to live RAM)
   Save n  ──────────────────▶  core 1 writes flash
          ◀─────────────────── Ack(save, ok, n)

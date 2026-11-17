@@ -32,13 +32,13 @@ tools/cpu_bench/build.sh
 python3 tools/cpu_bench/run_bench.py tools/cpu_bench/bench.elf 4800 [--profile]
 ```
 
-## Results (engine only, cycles per sample, 4800 samples = 100 ms)
+## Results (engine only, cycles per sample, 4800 samples = 100 ms; firmware 0.2.0)
 
 | Scenario | avg | p99 | max | max % of 4000 |
 | --- | ---: | ---: | ---: | ---: |
-| Idle (stopped, inputs connected) | 1162 | 1308 | 1308 | 33 % |
-| Demo song playing (4 drums, 2 CV tracks, both inputs, all FX) | 1562 | 1789 | 1894 | 47 % |
-| Pathological: 4 voices alternating Snare/Modal at max decay, ratchet ×4 on every row at 300 BPM, all mixer FX, both inputs | 2843 | 3107 | 3756 | 94 % |
+| Idle (stopped, inputs connected) | 1155 | 1352 | 1352 | 34 % |
+| Demo song playing (4 drums, 2 CV tracks, both inputs, all FX) | 1555 | 1781 | 1886 | 47 % |
+| Pathological: 4 voices alternating Snare/Modal at max decay, ratchet ×4 on every row at 300 BPM, all mixer FX, both inputs | 2836 | 3122 | 3718 | 93 % |
 
 Add **≈150 cycles** for the `ProcessSample()` wrapper (I/O mapping, SysTick,
 LEDs) and an estimated **400–700 cycles** for ComputerCard (not measured; it
@@ -53,6 +53,10 @@ depends on the library version). That gives:
 
 144 MHz (the ComputerCard default suggestion) would **not** be enough
 (3000 cycles); this is why the card runs at 192 MHz.
+
+The v2 knob feedback costs the audio core almost nothing: core 0 only copies
+a few words into the status block every 64 samples; the Panel report is
+built and rate-limited on core 1.
 
 ## What keeps the worst case flat
 

@@ -20,6 +20,17 @@ USB.
   part / stop on the Z switch, knob macros, external clock & reset, CV
   modulation.
 
+> **Status:** version 0.1 has been tested on a real Computer: the USB
+> connection, the sound engines and the panel controls work. The 0.2
+> additions (knob feedback, macro routing, new editor design) are covered by
+> host tests, a JS↔firmware cross-check and headless-browser tests against a
+> simulated module, but **have not run on hardware yet**. See
+> [Known risks](#known-risks).
+
+![Editor: tracker grid and drum voice modules](docs/screenshot-voices-1366x768.png)
+
+Deutsch: [README.de.md](README.de.md)
+
 ## Quick start
 
 1. **Flash the card.** Download `workshop_tracker.uf2` (in `dist/` or from
@@ -49,11 +60,26 @@ browser and can be exported/imported as `.wtrk.json`.
 
 | Area | |
 | --- | --- |
-| Top bar | Connect, transport (song / pattern / stop / next part), BPM, swing, CPU load of the module |
+| Top bar | Connect, transport (song / pattern / stop / next part), BPM, swing, position readout (mode · part · pattern · row, beat LED), CPU load of the module |
 | Toolbar | song name, flash slot load/save, read from / send to module, new, demo, export/import, octave, edit step, edit mode, follow |
-| Left | song arrangement (pattern × repeats, ▶ to start or cue an entry), pattern selector & length, copy/paste/clear, effect help |
+| Left | song arrangement (pattern × repeats, ▶ to start or cue an entry), pattern selector & length, copy/paste/clear, FX help, **Computer · Live** panel (the module's Main/X/Y knobs and Z page) |
 | Centre | the tracker grid |
-| Right | voice editors (engine, decay, A, B, tune, velocity sensitivity), CV track settings, mixer with meters |
+| Right, tab **Drum voices** | four Eurorack-style modules: engine, routing buttons **MAIN** / **X**, knobs Decay, A, B, Tune, Vel; the red LED lights on every hit |
+| Right, tab **Mixer** | DR1–DR4, **IN1**, **IN2** (audio inputs) and Master: level, pan, drive, tone, gate VCA (inputs), mute, meters, master filter |
+| Right, tab **CV / Gate** | gate length, glide, transpose for both CV tracks, and the 0 V note |
+
+**Knobs:** drag up/down (Shift = fine), mouse wheel, double-click resets,
+and arrow keys / PgUp / PgDn / Home / End work when a knob is focused.
+
+**Live feedback from the module (firmware ≥ 0.2):** the module's PERFORM
+macros are **offsets** on top of the song values, never saved. In the editor
+the **gold arc** is the song value, and a **red arc + dot** is what the module
+plays right now (drum Decay via Main, param A via X, master Filter via Y + CV
+in 2). Tempo, swing, slot and play position changed on the panel are shown
+live. Per drum voice, **MAIN** and **X** choose whether the Main / X macro
+affects that voice. This routing is stored in the song.
+
+![Mixer tab](docs/screenshot-mixer-1366x768.png)
 
 **Keys** (press *Keys* in the app for the full list): piano layout on
 `Z S X D C V…` (lower octave) and `Q 2 W 3 E R…` (upper), `1` = note OFF,
@@ -84,7 +110,7 @@ how much velocity changes loudness. Fx `A`, `B`, `D` lock A/B/decay per hit.
 | Jack | Function |
 | --- | --- |
 | Audio out 1/2 | stereo mix L/R |
-| Audio in 1/2 | VCO 1/2 into mixer channels 5/6 (gate VCA optional) |
+| Audio in 1/2 | mixer channels **IN1 / IN2** (e.g. the VCOs), gate VCA optional |
 | CV out 1/2 | 1 V/oct pitch of CV tracks 1/2 (calibrated) |
 | Pulse out 1/2 | gates of CV tracks 1/2 |
 | Pulse in 1 | clock in, 1 pulse = 1 row (replaces the internal clock while plugged) |
@@ -94,7 +120,7 @@ how much velocity changes loudness. Fx `A`, `B`, `D` lock A/B/decay per hit.
 
 | Z | Main | X | Y |
 | --- | --- | --- | --- |
-| **Middle** (PERFORM) | decay macro | colour macro (param A) | master filter LP ↔ HP |
+| **Middle** (PERFORM) | decay macro (routed voices) | colour macro (param A, routed voices) | master filter LP ↔ HP |
 | **Up** (SELECT) | song slot 1–6 | tempo 40–240 | swing 50–75 % |
 | **Down** (momentary) | tap: start / next part · hold 0.8 s: stop | | |
 
@@ -119,10 +145,39 @@ Tempo, swing and macros use soft takeover. Details and LED meanings:
 * **Flash:** 6 song slots (28 KB each, CRC-checked) in the top of the card's
   flash, written by core 1 one sector at a time. The firmware runs entirely
   from RAM (`copy_to_ram`), so audio keeps running while saving.
+* **Feedback:** core 1 sends a Panel report (knob positions, pickup state,
+  macros, effective values, tempo/swing/slot/position) only on change, ≤ 30/s,
+  while the editor is connected.
 * **CPU:** 192 MHz. ≈ 47 % of the per-sample budget for the demo song (engine
   only, estimated), ≈ 94 % in a deliberately pathological worst case. See
   [docs/CPU_BUDGET.md](docs/CPU_BUDGET.md). The module reports its measured
   load to the editor.
+
+## Building
+
+Firmware (Pico SDK 2.2.0, ARM GCC 14):
+
+```sh
+export PICO_SDK_PATH=/path/to/pico-sdk     # with submodules (TinyUSB)
+cmake -S . -B build -G Ninja -DPICO_BOARD=pico -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+cp build/workshop_tracker.uf2 dist/
+```
+
+Tests:
+
+```sh
+# engine, sequencer, panel, protocol and flash-format unit tests (host g++)
+cmake -S . -B build-host -DBUILD_HOST_TESTS=ON && cmake --build build-host && ./build-host/test_engine
+# JS protocol tests + JS↔C++ cross-check (uses build-host/xcheck from the step above)
+node --test web/test/*.test.mjs
+```
+
+CPU benchmark: see [docs/CPU_BUDGET.md](docs/CPU_BUDGET.md).
+
+CI (`.github/workflows/build.yml`) runs the tests, builds the UF2, attaches it
+to tagged releases and deploys `web/` to GitHub Pages (enable Pages with
+source **GitHub Actions** in the repo settings).
 
 ## Layout
 
@@ -134,6 +189,7 @@ vendor/ComputerCard/      ComputerCard v0.4.0 (MIT, Chris Johnson)
 web/                      the editor (plain HTML/CSS/ES modules, no build step)
 tests/                    host unit tests, JS↔C++ cross-check helper
 tools/cpu_bench/          Cortex-M0+ cycle estimate in an emulator
+tools/ui-shots/           editor screenshots + layout checks against a fake module (optional, Chrome + puppeteer-core)
 docs/                     protocol, controls, CPU budget, research notes
 dist/                     built UF2
 ```
@@ -145,16 +201,18 @@ Implemented: everything listed at the top. Not implemented / limitations:
 * no delay/reverb send (CPU budget went to the voices);
 * USB **device** mode only (no USB-host MIDI keyboards);
 * external clock is fixed at **1 pulse = 1 row** (no PPQN setting);
-* panel macros affect new hits, not notes already ringing;
+* panel decay/colour macros affect new hits, not notes already ringing;
+* the module's knob positions are shown in the editor but can't be moved from it (they are physical);
 * no per-track mute/solo in the grid (use the mixer mute), no undo;
 * song changes from the panel are only possible between the 6 stored slots;
 * ComputerCard's own interrupt overhead is estimated, not measured.
 
 ## Known risks
 
-* **Not yet run on hardware.** USB enumeration, the flash writes while audio
-  runs, the 192 MHz / 1.15 V clock, the knob/switch feel and the absolute
-  levels all need a real test.
+* 0.1 was confirmed on hardware (USB, sound, panel). **0.2's** knob-feedback
+  traffic, macro routing and editor design have only been tested in
+  simulation. Flash writes while audio runs and long-term stability at
+  192 MHz / 1.15 V still need more hardware time.
 * The pathological CPU worst case is close to the budget; if you hear clicks,
   check the CPU readout in the editor.
 * Saving a slot overwrites it. If power fails mid-save, that slot comes back

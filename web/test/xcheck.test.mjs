@@ -61,3 +61,36 @@ test('single edits are applied by the firmware parser', { skip }, () => {
   assert.deepEqual(raw(back), raw(s));
   assert.equal(back.header.length, K.headerBytes);
 });
+
+test('v2: SetMacroMask + Panel report match the firmware', { skip }, async () => {
+  const { effectiveDrum, effectiveFilter } = await import('../js/protocol.js');
+  const s = demoSong();
+  s.setMacroMask(0, 0b0101);
+  s.setMacroMask(1, 0b1110);
+  s.setDrum(0, 1, 110); s.setDrum(1, 1, 20); s.setDrum(2, 2, 10); s.setDrum(3, 2, 90);
+  s.setMaster(2, 70);
+  const stream = [msg.setHeader(new Song()), ...uploadMessages(s).slice(0, 1), msg.setMacroMask(0, 0b0101), msg.setMacroMask(1, 0b1110)];
+  // Song state survives the round trip through the firmware parser.
+  const back = roundTrip(stream);
+  assert.equal(back.macroMask(0), 0b0101);
+  assert.equal(back.macroMask(1), 0b1110);
+  assert.deepEqual(Buffer.from(back.header), Buffer.from(s.header));
+  // Panel report for the fixed status in tests/xcheck.cpp.
+  const reply = execFileSync(bin, ['panel'], { input: Buffer.concat(stream.map((m) => Buffer.from(m))) });
+  const frames = splitSysex(reply);
+  assert.equal(frames.length, 1);
+  const m = decode(frames[0]);
+  assert.equal(m.type, 'panel');
+  assert.equal(m.selectPage, true); assert.equal(m.downHeld, false);
+  assert.deepEqual(m.knobs, [10, 64, 127]);
+  assert.deepEqual(m.waiting, [true, false, true]);
+  assert.deepEqual(m.macros, [25, -40, -64]);
+  assert.deepEqual(m.masks, [0b0101, 0b1110]);
+  assert.equal(m.slot, 4); assert.equal(m.mode, 2); assert.equal(m.pattern, 9); assert.equal(m.transpose, 12);
+  assert.equal(m.tempo, s.tempo); assert.equal(m.swing, s.swing);
+  for (let v = 0; v < 4; v++) {
+    assert.equal(m.effDecay[v], effectiveDrum(s, m.macros, v, 1), `decay ${v}`);
+    assert.equal(m.effA[v], effectiveDrum(s, m.macros, v, 2), `A ${v}`);
+  }
+  assert.equal(m.effFilter, effectiveFilter(s, m.macros));
+});

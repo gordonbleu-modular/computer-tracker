@@ -118,6 +118,11 @@ public:
         if (page_up_) return !tempo_.caught || !swing_.caught;
         return !macro_[0].caught || !macro_[1].caught || !macro_[2].caught;
     }
+    // Bit k set = knob k (0 Main, 1 X, 2 Y) waits for soft takeover.
+    int waiting_mask() const {
+        if (page_up_) return (tempo_.caught ? 0 : 2) | (swing_.caught ? 0 : 4);
+        return (macro_[0].caught ? 0 : 1) | (macro_[1].caught ? 0 : 2) | (macro_[2].caught ? 0 : 4);
+    }
     int slot() const { return current_slot_; }
     void set_slot(int s) { current_slot_ = s; }
 

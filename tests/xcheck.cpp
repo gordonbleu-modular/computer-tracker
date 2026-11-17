@@ -4,6 +4,9 @@
 //   xcheck apply  -> reads a SysEx stream on stdin, applies it to an empty
 //                    song through proto::Protocol, then answers GetSong and
 //                    writes the framed reply on stdout.
+//   xcheck panel  -> reads a SysEx stream (song edits) like apply, then writes
+//                    one framed Panel report for a fixed engine status
+//                    (see web/test/xcheck.test.mjs for the values).
 // SPDX-License-Identifier: MIT
 #include "engine/protocol.h"
 #include <cstdio>
@@ -38,7 +41,8 @@ int main(int argc, char** argv) {
         std::fwrite(s.get(), 1, sizeof(Song), stdout);
         return 0;
     }
-    if (std::strcmp(argv[1], "apply")) return 2;
+    const bool panel = !std::strcmp(argv[1], "panel");
+    if (std::strcmp(argv[1], "apply") && !panel) return 2;
     song_clear(*s);
     PipeHost h(s.get());
     proto::Protocol pr(h);
@@ -46,6 +50,18 @@ int main(int argc, char** argv) {
     int c;
     while ((c = std::fgetc(stdin)) != EOF) in.push_back(static_cast<uint8_t>(c));
     pr.feed(in.data(), static_cast<int>(in.size()));
+    if (panel) {
+        EngineStatus st;
+        st.flags = 16; st.down_held = 0;
+        st.knob_waiting = 5;
+        st.macro[0] = 25; st.macro[1] = -40; st.macro[2] = -64;
+        st.slot = 4; st.mode = 2; st.entry = 0; st.pattern = 9; st.transpose = 12;
+        const proto::PanelView v{{10, 64, 127}};
+        uint8_t b[64];
+        const int n = proto::build_panel(b, st, *s, v);
+        h.send(b, n);
+        return 0;
+    }
     const uint8_t get[] = {0xF0, proto::kMfr, proto::kDevice, proto::GetSong, 0xF7};
     pr.feed(get, sizeof get);
     return 0;

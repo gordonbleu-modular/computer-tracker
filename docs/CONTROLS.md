@@ -20,7 +20,7 @@
 | Jack | Function |
 | --- | --- |
 | **Audio out 1 / 2** | Stereo mix **L / R**: 4 drum voices + both audio inputs, through the mixer and master section |
-| **Audio in 1 / 2** | Mixer channels 5/6 ("VCO1", "VCO2"). Patch the two analogue VCOs here. Each has drive, tone, level, pan and an optional **gate VCA** that opens with CV/gate track 1/2, so the VCOs are "played" by the tracker. Unplugged inputs are skipped (saves CPU, no noise). |
+| **Audio in 1 / 2** | Mixer channels **IN1 / IN2** (5/6). Patch the two analogue VCOs (or anything else) here. Each has drive, tone, level, pan and an optional **gate VCA** that opens with CV/gate track 1/2, so the VCOs are "played" by the tracker. Unplugged inputs are skipped (saves CPU, no noise). |
 | **CV out 1 / 2** | Calibrated **1 V/oct** pitch of CV/gate track 1 / 2 (uses the card's EEPROM calibration). The song's "0 V note" (default C2) is 0 V; range 0…+6 V. Glide and slide happen here. |
 | **Pulse out 1 / 2** | **Gate** of CV/gate track 1 / 2 (high while the note sounds; brief 2 ms gap between retriggered notes, held through slides). |
 | **Pulse in 1** | **Clock in**: one rising edge = one tracker row (e.g. 4 PPQN = 16th notes). When a cable is plugged in, the internal clock is off; swing still applies (the odd rows are delayed by a fraction of the measured row length). The first pulse after start plays row 0. |
@@ -37,9 +37,24 @@ same live song.
 
 | Knob | Macro | Effect |
 | --- | --- | --- |
-| **Main** | Decay | Offsets the decay of every drum hit (−64…+63; centre = as programmed) |
-| **X** | Colour | Offsets param A of every drum hit (sweep / brightness / resonance / FM ratio / material / noise mix) |
-| **Y** | Filter | Master filter: left = low-pass, centre = off, right = high-pass |
+| **Main** | Decay | Offsets the decay of the drum voices routed to **MAIN** (−64…+63; centre = as programmed) |
+| **X** | Colour | Offsets param A (sweep / brightness / resonance / FM ratio / material / noise mix) of the voices routed to **X** |
+| **Y** | Filter | Master filter offset: left = low-pass, centre = off, right = high-pass (CV in 2 adds to it) |
+
+**Macros are offsets, not edits.** They are added on top of the values
+stored in the song and are never saved; returning the knob to noon gives
+the song's sound back exactly. **Routing:** each drum module in the
+editor has **MAIN** and **X** buttons (red LED = routed) that choose which of the
+4 voices the Main and X macros act on. The routing is stored in the song (and
+so in each flash slot); default is all voices. Firmware 0.1 had no routing
+(always all voices).
+
+**Feedback in the editor (firmware ≥ 0.2).** While connected, the module
+reports its knobs about 30 times per second when they move. The editor's
+*Computer · Live* panel mirrors Main/X/Y and the Z page. A blinking label
+means the knob is waiting for pickup. On every affected knob in the editor
+(drum Decay and A, master Filter) the **gold arc** is the song value and a
+**red arc and dot** show the value the module is playing right now.
 
 Decay and colour are applied **when a drum is hit** (not to notes already
 ringing). Filter acts continuously. All three have a small dead zone at noon.

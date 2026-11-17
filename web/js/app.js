@@ -2,15 +2,16 @@
 // SPDX-License-Identifier: MIT
 import {
   K, Song, msg, decode, DumpCollector, uploadMessages, demoSong, noteName, hex2, clamp,
-  ENGINES, MATERIALS, FX, NOTE_OFF, NOTE_EMPTY, PROTOCOL_VERSION,
+  ENGINES, MATERIALS, FX, NOTE_OFF, NOTE_EMPTY, PROTOCOL_VERSION, effectiveDrum, effectiveFilter,
 } from './protocol.js';
 import { Device } from './midi.js';
+import { Knob } from './knob.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
 const TRACK_NAMES = ['Drum 1', 'Drum 2', 'Drum 3', 'Drum 4', 'CV/Gate 1', 'CV/Gate 2'];
-const CH_NAMES = ['Dr1', 'Dr2', 'Dr3', 'Dr4', 'VCO1', 'VCO2'];
+const CH_NAMES = ['DR1', 'DR2', 'DR3', 'DR4', 'IN1', 'IN2'];
 const STORE_KEY = 'workshopTracker.song';
 const BACKUP_KEY = 'workshopTracker.backup';
 
@@ -22,6 +23,7 @@ const state = {
   status: null, info: null,
   clipTrack: null, clipPattern: null,
   dump: new DumpCollector(), dumping: false,
+  panel: null, panelAt: 0, legacy: false,
 };
 const dev = new Device();
 let pingTimer = null;
@@ -62,7 +64,7 @@ function buildGrid() {
     const dot = el('i', 'hit');
     headHits.push(dot);
     h.appendChild(dot);
-    const label = t < K.drumTracks ? `${TRACK_NAMES[t]} · ${ENGINES[state.song.drum(t, 0)].name}` : TRACK_NAMES[t];
+    const label = t < K.drumTracks ? `DR${t + 1} ${ENGINES[state.song.drum(t, 0)].name}` : `CV${t - K.drumTracks + 1} GATE`;
     h.appendChild(document.createTextNode(label));
     head.appendChild(h);
   }
@@ -133,7 +135,7 @@ function paintPlayhead() {
 function showFxHelp() {
   const isCv = state.track >= K.drumTracks;
   const lines = Object.entries(FX).filter(([, f]) => (isCv ? f.cv : f.drum)).map(([k, f]) => `<div><b>${k}</b> ${f.help}</div>`);
-  $('fxHelp').innerHTML = `<h2>Effects (${isCv ? 'CV track' : 'drum track'})</h2>${lines.join('')}` +
+  $('fxHelp').innerHTML = `<summary>FX column · ${isCv ? 'CV track' : 'drum track'}</summary>${lines.join('')}` +
     (isCv ? '<div class="dim">Velocity is ignored on CV tracks. Notes hold until the gate length (voice setting) or OFF.</div>'
           : '<div class="dim">Velocity .. = 100 (hex 64). OFF chokes the voice.</div>');
 }
@@ -308,138 +310,289 @@ function selectPattern(p) {
   if (state.status && state.status.mode === 2) send(msg.cue(state.pattern));
 }
 
-// ---------------------------------------------------------------- voices ---
-function slider(label, value, min, max, fmt, onInput) {
-  const w = el('label', 'prm');
-  const name = el('span', null, label);
-  const r = el('input'); r.type = 'range'; r.min = min; r.max = max; r.value = value;
-  const out = el('output', null, fmt(value));
-  r.oninput = () => { out.textContent = fmt(+r.value); onInput(+r.value); };
-  w.append(name, r, out);
-  w.set = (v) => { r.value = v; out.textContent = fmt(v); };
-  w.setLabel = (t) => { name.textContent = t; };
-  w.setFmt = (f) => { fmt = f; out.textContent = fmt(+r.value); };
-  return w;
-}
+// --------------------------------------------------------------- modules ---
 const fmtDecay = (v) => { const s = 0.005 * Math.pow(800, v / 127); return s < 1 ? `${Math.round(s * 1000)}ms` : `${s.toFixed(1)}s`; };
 const fmtSigned = (v) => { const d = v - 64; return (d > 0 ? '+' : '') + d; };
 const fmtPan = (v) => (v === 64 ? 'C' : v < 64 ? `L${64 - v}` : `R${v - 64}`);
 const fmtTone = (v) => (v < 60 ? `LP${60 - v}` : v > 68 ? `HP${v - 68}` : 'flat');
 const fmtFilter = (v) => (v < 61 ? `LP${61 - v}` : v > 67 ? `HP${v - 67}` : 'off');
-const fmtA = (eng) => (v) => (eng === 4 ? MATERIALS[v >> 4] : eng === 3 ? `r${v >> 3}` : String(v));
+const fmtA = (eng) => (v) => (eng === 4 ? MATERIALS[v >> 4].slice(0, 8) : eng === 3 ? `r${v >> 3}` : String(v));
+const fmtMacro = (v) => (v > 0 ? '+' : '') + v;
 
+// knobs.drum[v][param], knobs.cv[t][param], knobs.mix[ch][param], knobs.master[param]
+const knobs = { drum: [], cv: [], mix: [], master: [] };
 let voicePanels = [];
+let voiceLeds = [];
+let gateLeds = [];
+let routeBtns = []; // routeBtns[v][macro]
+let lastMaskEdit = 0;
+
+function moduleEl(title, cls = '') {
+  const m = el('div', 'module ' + cls);
+  for (const c of ['tl', 'tr', 'bl', 'br']) m.appendChild(el('i', 'screw ' + c));
+  const t = el('div', 'mtitle');
+  t.append(el('b', null, title));
+  const led = el('i', 'led');
+  t.append(led);
+  m.appendChild(t);
+  m.led = led;
+  return m;
+}
+function jacks(names) {
+  const j = el('div', 'jacks');
+  for (const n of names) { const x = el('span', 'jack'); x.append(el('i'), document.createTextNode(n)); j.appendChild(x); }
+  return j;
+}
+function krow(...ks) { const r = el('div', 'krow'); ks.forEach((k) => r.appendChild(k.el)); return r; }
+
 function buildVoices() {
   const box = $('voices');
   box.innerHTML = '';
-  voicePanels = [];
+  voicePanels = []; voiceLeds = []; routeBtns = []; knobs.drum = [];
   const s = state.song;
   for (let v = 0; v < K.drumTracks; v++) {
-    const p = el('div', 'voice');
-    const title = el('div', 'title');
-    title.appendChild(el('b', null, TRACK_NAMES[v]));
-    const eng = el('select');
+    const m = moduleEl(`DRUM ${v + 1}`);
+    voiceLeds.push(m.led);
+    const set = (param) => (x) => { s.setDrum(v, param, x); send(msg.setDrum(v, param, x)); changed(); paintMods(); };
+    const eng = el('select', 'engine');
+    eng.title = 'Synthesis engine';
     ENGINES.forEach((e, i) => { const o = el('option', null, e.name); o.value = i; o.title = e.info; eng.appendChild(o); });
     eng.value = s.drum(v, 0);
-    title.appendChild(eng);
-    p.appendChild(title);
-    const info = el('div', 'dim', ENGINES[s.drum(v, 0)].info);
-    p.appendChild(info);
-    const set = (param) => (x) => { s.setDrum(v, param, x); send(msg.setDrum(v, param, x)); changed(); };
-    const dec = slider('Decay', s.drum(v, 1), 0, 127, fmtDecay, set(1));
-    const a = slider(ENGINES[s.drum(v, 0)].a, s.drum(v, 2), 0, 127, fmtA(s.drum(v, 0)), set(2));
-    const b = slider(ENGINES[s.drum(v, 0)].b, s.drum(v, 3), 0, 127, String, set(3));
-    const tune = slider('Tune', s.drum(v, 4), 16, 112, fmtSigned, set(4));
-    const vs = slider('Vel sens', s.drum(v, 5), 0, 127, String, set(5));
+    const sub = el('div', 'msub', ENGINES[s.drum(v, 0)].info);
+    // Which PERFORM macros act on this voice.
+    const routes = el('div', 'routes');
+    routeBtns[v] = [];
+    [['MAIN', 'Main knob (decay macro)'], ['X', 'X knob (colour macro, param A)']].forEach(([name, what], mi) => {
+      const b = el('button');
+      b.append(el('i', 'led'), document.createTextNode(name));
+      b.title = `${what} acts on this voice in PERFORM mode. Click to toggle. Stored in the song.`;
+      b.onclick = () => {
+        const bits = s.macroMask(mi) ^ (1 << v);
+        s.setMacroMask(mi, bits);
+        lastMaskEdit = performance.now();
+        send(msg.setMacroMask(mi, bits));
+        changed(); paintRoutes(); paintMods();
+      };
+      routes.appendChild(b);
+      routeBtns[v][mi] = b;
+    });
+    const e0 = s.drum(v, 0);
+    const kd = new Knob({ label: 'Decay', value: s.drum(v, 1), def: 64, fmt: fmtDecay, size: 'l', onChange: set(1) });
+    const ka = new Knob({ label: ENGINES[e0].a, value: s.drum(v, 2), def: 64, fmt: fmtA(e0), onChange: set(2) });
+    const kb = new Knob({ label: ENGINES[e0].b, value: s.drum(v, 3), def: 32, onChange: set(3) });
+    const kt = new Knob({ label: 'Tune', min: 16, max: 112, value: s.drum(v, 4), def: 64, fmt: fmtSigned, size: 's', bipolar: true, onChange: set(4) });
+    const kv = new Knob({ label: 'Vel', value: s.drum(v, 5), def: 100, size: 's', onChange: set(5), title: 'Velocity sensitivity' });
+    knobs.drum[v] = [null, kd, ka, kb, kt, kv];
     eng.onchange = () => {
       const e = +eng.value;
       set(0)(e);
-      info.textContent = ENGINES[e].info;
-      a.setLabel(ENGINES[e].a); a.setFmt(fmtA(e));
-      b.setLabel(ENGINES[e].b);
+      sub.textContent = ENGINES[e].info;
+      ka.setLabel(ENGINES[e].a); ka.setFmt(fmtA(e));
+      kb.setLabel(ENGINES[e].b);
       buildGrid();
     };
-    p.append(dec, a, b, tune, vs);
-    const prev = el('button', null, 'Audition');
-    prev.onclick = () => send(msg.preview(v, 48, 110));
-    p.appendChild(prev);
-    box.appendChild(p);
-    voicePanels.push(p);
+    const aud = el('button', 'audition', 'TRIG');
+    aud.title = 'Play this voice on the module';
+    aud.onclick = () => send(msg.preview(v, 48, 110));
+    m.append(eng, sub, routes, kd.el, krow(ka, kb), krow(kt, kv), el('div', 'spacer'), aud, jacks(['TRIG', 'OUT']));
+    box.appendChild(m);
+    voicePanels.push(m);
   }
+  paintRoutes();
+  buildCv();
+  paintMods();
+}
+
+function paintRoutes() {
+  const s = state.song;
+  routeBtns.forEach((row, v) => row.forEach((b, mi) => {
+    const on = s.macroOn(mi, v);
+    b.classList.toggle('on', on);
+    b.querySelector('.led').classList.toggle('lit', on);
+    b.disabled = !!state.legacy;
+    b.setAttribute('aria-pressed', String(on));
+  }));
+}
+
+function buildCv() {
+  const box = $('cvpanel');
+  box.innerHTML = '';
+  gateLeds = []; knobs.cv = [];
+  const s = state.song;
   for (let c = 0; c < K.cvTracks; c++) {
-    const p = el('div', 'voice cv');
-    const title = el('div', 'title');
-    title.appendChild(el('b', null, TRACK_NAMES[K.drumTracks + c]));
-    title.appendChild(el('span', 'dim', `CV out ${c + 1} · Pulse out ${c + 1}`));
-    p.appendChild(title);
+    const m = moduleEl(`CV/GATE ${c + 1}`, 'voice-cv');
+    gateLeds.push(m.led);
     const set = (param) => (x) => { s.setCv(c, param, x); send(msg.setCv(c, param, x)); changed(); };
-    p.append(
-      slider('Gate', s.cv(c, 0), 0, 64, (v) => (v === 0 ? 'tie' : `${(v / 16).toFixed(2)} row`), set(0)),
-      slider('Glide', s.cv(c, 1), 0, 127, (v) => (v === 0 ? 'off' : `${Math.round((48 + v * v * 6) / 48)}ms`), set(1)),
-      slider('Transpose', s.cv(c, 2), 16, 112, fmtSigned, set(2)),
-    );
-    const prev = el('button', null, 'Test note');
-    prev.onclick = () => send(msg.preview(K.drumTracks + c, 48, 100));
-    p.appendChild(prev);
-    box.appendChild(p);
-    voicePanels.push(p);
+    const kg = new Knob({ label: 'Gate', min: 0, max: 64, value: s.cv(c, 0), def: 8, size: 'l', fmt: (v) => (v === 0 ? 'tie' : `${(v / 16).toFixed(2)}row`), onChange: set(0) });
+    const kgl = new Knob({ label: 'Glide', value: s.cv(c, 1), def: 0, fmt: (v) => (v === 0 ? 'off' : `${Math.round((48 + v * v * 6) / 48)}ms`), onChange: set(1) });
+    const ktr = new Knob({ label: 'Transp', min: 16, max: 112, value: s.cv(c, 2), def: 64, fmt: fmtSigned, bipolar: true, onChange: set(2) });
+    knobs.cv[c] = [kg, kgl, ktr];
+    const test = el('button', 'audition', 'TEST');
+    test.title = 'Play a test note on this CV/gate output';
+    test.onclick = () => send(msg.preview(K.drumTracks + c, 48, 100));
+    m.append(el('div', 'msub', `CV out ${c + 1} = pitch · pulse out ${c + 1} = gate`), kg.el, krow(kgl, ktr), el('div', 'spacer'), test, jacks(['CV', 'GATE']));
+    box.appendChild(m);
+    voicePanels.push(m);
   }
-  const g = el('div', 'voice cv');
-  g.appendChild(el('div', 'title')).appendChild(el('b', null, 'CV range'));
-  g.appendChild(slider('0 V note', s.cvZero, 0, 96, (v) => noteName(v), (x) => { s.cvZero = x; send(msg.setZeroNote(x)); changed(); }));
-  g.appendChild(el('div', 'dim', 'This note gives 0 V; lower notes stay at 0 V. 1 V/oct up to about +6 V.'));
+  const g = moduleEl('CV RANGE', 'voice-cv');
+  const kz = new Knob({ label: '0 V note', min: 0, max: 96, value: s.cvZero, def: 36, size: 'l', fmt: (v) => noteName(v), onChange: (x) => { s.cvZero = x; send(msg.setZeroNote(x)); changed(); } });
+  knobs.cvZero = kz;
+  g.append(el('div', 'msub', '1 V/oct, 0…+6 V'), kz.el, el('div', 'msub', 'This note = 0 V. Lower notes stay at 0 V.'), el('div', 'spacer'), jacks(['CV1', 'CV2']));
   box.appendChild(g);
 }
+
 function selectVoicePanel(t) { voicePanels.forEach((p, i) => p.classList.toggle('sel', i === t)); }
 
 // ----------------------------------------------------------------- mixer ---
 let meters = [];
+let muteBtns = [];
 function buildMixer() {
   const box = $('mixer');
   box.innerHTML = '';
-  meters = [];
+  meters = []; muteBtns = []; knobs.mix = [];
   const s = state.song;
-  const knob = (label, value, min, max, fmt, on) => {
-    const w = el('label', 'k');
-    w.appendChild(el('span', null, label));
-    const r = el('input'); r.type = 'range'; r.min = min; r.max = max; r.value = value;
-    const o = el('output', null, fmt(value));
-    r.oninput = () => { o.textContent = fmt(+r.value); on(+r.value); };
-    w.append(r, o);
-    return w;
-  };
   for (let ch = 0; ch < K.channels; ch++) {
-    const st = el('div', 'strip' + (ch >= K.drumTracks ? ' in' : ''));
-    st.appendChild(el('div', 'nm', CH_NAMES[ch]));
-    const m = el('div', 'meter'); const bar = el('i'); m.appendChild(bar); meters.push(bar);
-    st.appendChild(m);
+    const isIn = ch >= K.drumTracks;
+    const m = moduleEl(CH_NAMES[ch], 'strip' + (isIn ? ' in' : ''));
+    const met = el('div', 'meter'); const bar = el('i'); met.appendChild(bar); meters.push(bar);
     const set = (param) => (x) => { s.setMix(ch, param, x); send(msg.setMix(ch, param, x)); changed(); };
-    st.append(
-      knob('Level', s.mix(ch, 0), 0, 127, String, set(0)),
-      knob('Pan', s.mix(ch, 1), 0, 127, fmtPan, set(1)),
-      knob('Drive', s.mix(ch, 2), 0, 127, String, set(2)),
-      knob('Tone', s.mix(ch, 3), 0, 127, fmtTone, set(3)),
-    );
-    if (ch >= K.drumTracks) {
-      st.append(knob('Gate VCA', s.mix(ch, 4), 0, 127, (v) => (v ? fmtDecay(v) : 'off'), set(4)));
-      st.title = `Audio in ${ch - K.drumTracks + 1}. Gate VCA: follows CV/Gate track ${ch - K.drumTracks + 1} (off = always open).`;
+    const k = [
+      new Knob({ label: 'Level', value: s.mix(ch, 0), def: 110, onChange: set(0) }),
+      new Knob({ label: 'Pan', value: s.mix(ch, 1), def: 64, fmt: fmtPan, size: 's', bipolar: true, onChange: set(1) }),
+      new Knob({ label: 'Drive', value: s.mix(ch, 2), def: 0, size: 's', onChange: set(2) }),
+      new Knob({ label: 'Tone', value: s.mix(ch, 3), def: 64, fmt: fmtTone, size: 's', bipolar: true, onChange: set(3) }),
+    ];
+    knobs.mix[ch] = k;
+    m.append(met, ...k.map((x) => x.el));
+    if (isIn) {
+      const vca = new Knob({ label: 'Gate VCA', value: s.mix(ch, 4), def: 0, size: 's', fmt: (v) => (v ? fmtDecay(v) : 'off'), onChange: set(4),
+        title: `Audio in ${ch - K.drumTracks + 1}: opens with CV/gate track ${ch - K.drumTracks + 1}; value = release time (off = always open)` });
+      k.push(vca);
+      m.appendChild(vca.el);
+      m.title = `IN${ch - K.drumTracks + 1} = audio input ${ch - K.drumTracks + 1} (e.g. a VCO)`;
     }
-    const mute = el('button', 'mute' + (s.mix(ch, 5) >= 64 ? ' on' : ''), 'M');
-    mute.onclick = () => { const v = s.mix(ch, 5) >= 64 ? 0 : 127; set(5)(v); mute.classList.toggle('on', v >= 64); };
-    st.appendChild(mute);
-    box.appendChild(st);
+    const mute = el('button', 'mute');
+    mute.append(el('i', 'led'), document.createTextNode('MUTE'));
+    mute.onclick = () => { const v = s.mix(ch, 5) >= 64 ? 0 : 127; set(5)(v); paintMutes(); };
+    muteBtns.push(mute);
+    m.append(el('div', 'spacer'), mute);
+    box.appendChild(m);
   }
-  const ms = el('div', 'strip master');
-  ms.appendChild(el('div', 'nm', 'Master'));
-  const mL = el('div', 'meter'); const bL = el('i'); mL.appendChild(bL);
-  const mR = el('div', 'meter'); const bR = el('i'); mR.appendChild(bR);
-  meters.push(bL, bR);
-  const setM = (param) => (x) => { s.setMaster(param, x); send(msg.setMaster(param, x)); changed(); };
-  ms.append(mL, mR,
-    knob('Level', s.master(0), 0, 127, String, setM(0)),
-    knob('Drive', s.master(1), 0, 127, String, setM(1)),
-    knob('Filter', s.master(2), 0, 127, fmtFilter, setM(2)));
+  const ms = moduleEl('MASTER', 'strip master');
+  const mm = el('div', 'meters');
+  for (let i = 0; i < 2; i++) { const met = el('div', 'meter'); const bar = el('i'); met.appendChild(bar); meters.push(bar); mm.appendChild(met); }
+  const setM = (param) => (x) => { s.setMaster(param, x); send(msg.setMaster(param, x)); changed(); paintMods(); };
+  knobs.master = [
+    new Knob({ label: 'Level', value: s.master(0), def: 120, onChange: setM(0) }),
+    new Knob({ label: 'Drive', value: s.master(1), def: 10, size: 's', onChange: setM(1) }),
+    new Knob({ label: 'Filter', value: s.master(2), def: 64, fmt: fmtFilter, size: 'l', bipolar: true, onChange: setM(2),
+      title: 'Master filter: left = low-pass, centre = off, right = high-pass. The module\'s Y knob and CV in 2 add to it (red).' }),
+  ];
+  ms.append(mm, ...knobs.master.map((x) => x.el), el('div', 'spacer'), jacks(['L', 'R']));
   box.appendChild(ms);
+  paintMutes();
+  paintMods();
+}
+function paintMutes() {
+  muteBtns.forEach((b, ch) => { const on = state.song.mix(ch, 5) >= 64; b.classList.toggle('on', on); b.querySelector('.led').classList.toggle('lit', on); b.setAttribute('aria-pressed', String(on)); });
+}
+
+// Red "live" arcs: the module's PERFORM macros as offsets on the song values.
+function liveMacros() {
+  if (!dev.connected) return null;
+  if (state.panel) return state.panel.macros;
+  if (state.status) return state.status.macros;
+  return null;
+}
+function paintMods() {
+  // Old firmware (protocol 1) has no routing: its macros act on every voice.
+  const s = state.legacy ? { drum: (v, p) => state.song.drum(v, p), master: (p) => state.song.master(p), macroOn: () => true } : state.song;
+  const mac = liveMacros() || [0, 0, 0];
+  const p = dev.connected && state.panel;
+  for (let v = 0; v < knobs.drum.length; v++) {
+    const kk = knobs.drum[v];
+    if (!kk) continue;
+    kk[1].setMod(p ? p.effDecay[v] : effectiveDrum(s, mac, v, 1));
+    kk[2].setMod(p ? p.effA[v] : effectiveDrum(s, mac, v, 2));
+  }
+  if (knobs.master[2]) knobs.master[2].setMod(p ? p.effFilter : effectiveFilter(s, mac));
+}
+
+// ------------------------------------------------- module panel (live) ----
+const comp = { knobs: [], leds: [], z: [], page: null, note: null, led: null };
+function buildComputer() {
+  const box = $('computer');
+  box.innerHTML = '';
+  const t = el('div', 'mtitle');
+  t.append(el('b', null, 'COMPUTER · LIVE'));
+  comp.led = el('i', 'led');
+  comp.led.title = 'Lit while the module reports its panel';
+  t.append(comp.led);
+  box.appendChild(t);
+  const row = el('div', 'krow');
+  comp.knobs = [0, 1, 2].map((i) => {
+    const k = new Knob({ label: ['Main', 'X', 'Y'][i], value: 64, min: 0, max: 127, size: 's', readOnly: true, fmt: (v) => compFmt(i, v) });
+    row.appendChild(k.el);
+    return k;
+  });
+  box.appendChild(row);
+  const pg = el('div', 'page');
+  const z = el('span', 'z');
+  comp.z = [el('i'), el('i'), el('i')];
+  comp.z.forEach((x) => z.appendChild(x));
+  comp.page = el('b', null, '—');
+  const left = el('span');
+  left.append(z, comp.page);
+  comp.extra = el('span', null, '');
+  pg.append(left, comp.extra);
+  box.appendChild(pg);
+  comp.note = el('div', 'note', 'Connect to see the module\'s knobs.');
+  box.appendChild(comp.note);
+}
+function compFmt(i, v) {
+  const p = state.panel, st = state.status;
+  const select = p ? p.selectPage : st ? st.selectPage : false;
+  if (select) {
+    if (i === 0) return `slot ${(p ? p.slot : st ? st.slot : 0) + 1}`;
+    if (i === 1) return `${state.song.tempo}bpm`;
+    return `${state.song.swing}%`;
+  }
+  const mac = liveMacros() || [0, 0, 0];
+  return fmtMacro(mac[i]);
+}
+function paintComputer() {
+  const p = dev.connected ? state.panel : null;
+  const st = dev.connected ? state.status : null;
+  comp.led.classList.toggle('lit', !!p && performance.now() - state.panelAt < 1500);
+  if (!p && !st) {
+    comp.page.textContent = '—';
+    comp.extra.textContent = '';
+    comp.note.textContent = dev.connected ? 'Waiting for the module…' : 'Connect to see the module\'s knobs.';
+    comp.knobs.forEach((k) => { k.set(64); k.el.classList.remove('waiting'); });
+    comp.z.forEach((x) => x.classList.remove('on'));
+    return;
+  }
+  const select = p ? p.selectPage : st.selectPage;
+  const down = p ? p.downHeld : false;
+  const labels = select ? ['Slot', 'Tempo', 'Swing'] : ['Decay', 'Colour', 'Filter'];
+  const mac = liveMacros() || [0, 0, 0];
+  comp.knobs.forEach((k, i) => {
+    k.setLabel(labels[i]);
+    // v1 firmware has no knob positions: approximate from the macro value.
+    k.set(p ? p.knobs[i] : select ? 64 : mac[i] + 64);
+    const waiting = p ? p.waiting[i] : false;
+    k.lab.classList.toggle('blinktext', waiting);
+    k.el.title = waiting ? 'Waiting for pickup: turn the module knob past the current value' : '';
+  });
+  comp.z[0].classList.toggle('on', select);
+  comp.z[1].classList.toggle('on', !select && !down);
+  comp.z[2].classList.toggle('on', down);
+  comp.page.textContent = down ? 'Z DOWN' : select ? 'SELECT' : 'PERFORM';
+  comp.extra.textContent = p && p.transpose ? `CV1 ${p.transpose > 0 ? '+' : ''}${p.transpose}st` : '';
+  const waitAny = p ? p.waiting.some(Boolean) : st && st.knobWaiting;
+  comp.note.textContent = state.legacy ? 'Old firmware: approximate (no knob positions).'
+    : waitAny ? 'Blinking label = knob waits for pickup.'
+    : select ? 'Main = slot, X = tempo, Y = swing.' : 'Macros are live offsets, not saved.';
 }
 
 // ----------------------------------------------------------- whole song ---
@@ -469,9 +622,17 @@ function onMessage(data) {
   switch (m.type) {
     case 'info':
       state.info = m;
-      $('fwInfo').textContent = `fw ${m.firmware} · slot ${m.slot + 1}`;
+      $('fwInfo').textContent = `fw ${m.firmware}`;
       fillSlots(m.validSlots, m.slot);
-      if (m.protocol !== PROTOCOL_VERSION) toast(`Protocol ${m.protocol} on the module, editor speaks ${PROTOCOL_VERSION}. Update firmware or editor.`, 8000);
+      state.legacy = m.protocol < 2;
+      if (m.protocol < PROTOCOL_VERSION) {
+        banner(`The module runs firmware ${m.firmware} (protocol ${m.protocol}). Editing and playback work, but knob feedback and ` +
+          `MAIN/X voice routing need firmware 0.2 or newer: flash the new workshop_tracker.uf2.`);
+      } else if (m.protocol > PROTOCOL_VERSION) {
+        banner(`The module speaks protocol ${m.protocol}, this editor ${PROTOCOL_VERSION}. Reload the page or update the editor; some features may not work.`);
+      } else hideBanner();
+      paintRoutes();
+      paintComputer();
       break;
     case 'header': case 'chunk': {
       const song = state.dump.feed(m);
@@ -491,11 +652,13 @@ function onMessage(data) {
       break;
     }
     case 'status': onStatus(m); break;
+    case 'panel': onPanel(m); break;
     case 'ack': onAck(m); break;
     default: break;
   }
 }
 
+const MODES = ['STOPPED', 'SONG', 'PATTERN'];
 function onStatus(st) {
   if (st.bad) return;
   const prev = state.status;
@@ -503,20 +666,64 @@ function onStatus(st) {
   const cpu = $('cpu');
   cpu.textContent = `${st.cpu}% / ${st.cpuPeak}%`;
   cpu.className = st.cpuPeak > 90 ? 'hot' : st.cpuPeak > 75 ? 'warn' : '';
-  const modes = ['stopped', 'song', 'pattern'];
-  $('modeOut').textContent = `${modes[st.mode] || '?'}${st.mode ? ` · P${hex2(st.pattern)} row ${hex2(st.row)}` : ''}${st.extClock ? ' · ext clock' : ''}${st.nextQueued ? ' · next…' : ''}${st.selectPage ? ' · panel: SELECT' : ''}`;
+  let txt = MODES[st.mode] || '?';
+  if (st.mode === 1) txt += ` · PART ${st.entry + 1}/${state.song.songLen}`;
+  if (st.mode) txt += ` · P${hex2(st.pattern)} · ROW ${hex2(st.row)}`;
+  if (st.extClock) txt += ' · EXT CLK';
+  if (st.nextQueued) txt += ' · NEXT…';
+  $('modeOut').textContent = txt;
+  $('beatLed').classList.toggle('lit', st.mode !== 0 && st.row % 4 === 0);
   // Panel changes on the module (tempo / swing knobs) show up here.
-  if (st.tempo !== state.song.tempo && document.activeElement !== $('tempo')) { state.song.tempo = st.tempo; $('tempo').value = st.tempo; changed(); }
-  if (st.swing !== state.song.swing && document.activeElement !== $('swing')) { state.song.swing = st.swing; $('swing').value = st.swing; $('swingOut').textContent = st.swing + '%'; changed(); }
+  syncTempoSwing(st.tempo, st.swing);
   if (state.follow && st.mode !== 0 && st.pattern !== state.pattern && (!prev || prev.pattern !== st.pattern)) selectPattern(st.pattern);
   paintPlayhead();
   paintArrangementPos();
-  st.peaks.forEach((p, i) => { if (meters[i]) meters[i].style.width = `${Math.min(100, (p / 127) * 100)}%`; });
+  st.peaks.forEach((p, i) => { if (meters[i]) meters[i].style.height = `${Math.min(100, (p / 127) * 100)}%`; });
   headHits.forEach((d, i) => d.classList.toggle('lit', i < 4 ? !!(st.hits & (1 << i)) : st.gates[i - 4]));
+  for (let v = 0; v < 4; v++) if (st.hits & (1 << v)) flashLed(voiceLeds[v]);
+  gateLeds.forEach((l, i) => l.classList.toggle('lit', st.gates[i]));
   $('btnPlaySong').classList.toggle('on', st.mode === 1);
   $('btnPlayPat').classList.toggle('on', st.mode === 2);
-  if (state.info && st.slot !== state.info.slot) { state.info.slot = st.slot; $('slot').value = st.slot; $('fwInfo').textContent = `fw ${state.info.firmware} · slot ${st.slot + 1}`; }
+  if (state.info && st.slot !== state.info.slot) { state.info.slot = st.slot; $('slot').value = st.slot; }
+  if (!state.panel) { paintMods(); paintComputer(); } // v1 firmware: macros come with the status only
 }
+
+function syncTempoSwing(tempo, swing) {
+  if (tempo !== state.song.tempo && document.activeElement !== $('tempo')) { state.song.tempo = tempo; $('tempo').value = tempo; changed(); }
+  if (swing !== state.song.swing && document.activeElement !== $('swing')) { state.song.swing = swing; $('swing').value = swing; $('swingOut').textContent = swing + '%'; changed(); }
+}
+
+// Knob/macro feedback from the module (protocol v2).
+function onPanel(p) {
+  if (p.bad) return;
+  state.panel = p;
+  state.panelAt = performance.now();
+  // Routing edits from another editor (or a song loaded on the module).
+  if (performance.now() - lastMaskEdit > 800 && (p.masks[0] !== state.song.macroMask(0) || p.masks[1] !== state.song.macroMask(1))) {
+    state.song.setMacroMask(0, p.masks[0]); state.song.setMacroMask(1, p.masks[1]); changed(); paintRoutes();
+  }
+  syncTempoSwing(p.tempo, p.swing);
+  paintMods();
+  paintComputer();
+}
+
+const ledTimers = new WeakMap();
+function flashLed(l) {
+  if (!l) return;
+  l.classList.add('lit');
+  clearTimeout(ledTimers.get(l));
+  ledTimers.set(l, setTimeout(() => l.classList.remove('lit'), 110));
+}
+
+function banner(text) {
+  const b = $('banner');
+  b.innerHTML = '';
+  const x = el('button', null, 'OK');
+  x.onclick = hideBanner;
+  b.append(el('span', null, text), x);
+  b.hidden = false;
+}
+function hideBanner() { $('banner').hidden = true; }
 
 function onAck(m) {
   if (m.op === 'save') toast(m.status === 'ok' ? `Saved to slot ${m.slot + 1}.` : `Saving slot ${m.slot + 1} failed (${m.status}).`);
@@ -542,7 +749,7 @@ function fillSlots(valid, current) {
 function setConn(kind, text) {
   const c = $('connState');
   c.className = 'pill ' + kind;
-  c.textContent = text;
+  c.querySelector('span').textContent = text;
   $('btnConnect').textContent = dev.connected ? 'Disconnect' : 'Connect';
 }
 
@@ -571,6 +778,9 @@ async function connect() {
     dev.disconnect();
     clearInterval(pingTimer);
     state.status = null;
+    state.panel = null;
+    state.legacy = false;
+    paintMods(); paintComputer(); paintRoutes();
     setConn('off', 'offline');
     $('fwInfo').textContent = '';
     return;
@@ -595,6 +805,7 @@ async function connect() {
   }
   if (!pair) { toast('Module not found. Is the Workshop Tracker card in the Computer and the USB cable plugged into your computer?', 7000); return; }
   await dev.connect(pair.inp, pair.out);
+  state.panel = null; state.status = null; state.legacy = false;
   setConn('on', 'connected');
   try { localStorage.setItem(BACKUP_KEY, JSON.stringify(state.song.toJSON())); $('btnRestore').hidden = false; } catch {}
   send(msg.hello());
@@ -609,13 +820,24 @@ dev.onState = (reason) => {
   if (!dev.connected) {
     clearInterval(pingTimer);
     state.status = null;
+    state.panel = null;
+    state.legacy = false;
+    paintMods(); paintComputer(); paintRoutes();
     setConn('off', 'offline');
     if (reason) toast(reason + '. The module keeps playing on its own (performance mode).', 5000);
   }
 };
 
 // ---------------------------------------------------------------- wiring ---
+function selectTab(name) {
+  document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  for (const n of ['voices', 'mixer', 'cv']) $('pane-' + n).hidden = n !== name;
+  try { localStorage.setItem('workshopTracker.tab', name); } catch {}
+}
+
 function wire() {
+  document.querySelectorAll('.tabs button').forEach((b) => { b.onclick = () => selectTab(b.dataset.tab); });
+  selectTab((() => { try { return localStorage.getItem('workshopTracker.tab') || 'voices'; } catch { return 'voices'; } })());
   for (let o = 0; o <= 8; o++) { const x = el('option', null, String(o)); x.value = o; $('octave').appendChild(x); }
   for (let s = 0; s <= 8; s++) { const x = el('option', null, String(s)); x.value = s; $('step').appendChild(x); }
   for (let p = 0; p < K.patterns; p++) { const x = el('option', null, 'Pattern ' + hex2(p)); x.value = p; $('pattern').appendChild(x); }
@@ -720,5 +942,7 @@ function wire() {
 }
 
 wire();
+buildComputer();
 refreshAll();
+setInterval(paintComputer, 500); // live LED timeout
 $('grid').focus();

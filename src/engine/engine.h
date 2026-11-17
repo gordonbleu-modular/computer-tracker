@@ -86,6 +86,11 @@ struct EngineStatus {
     volatile uint32_t cv_note[2] = {0, 0};
     volatile uint32_t gate[2] = {0, 0};
     volatile uint32_t trig_count[kDrumTracks] = {};
+    // Panel state for the editor's knob feedback (protocol v2).
+    volatile int32_t knob[3] = {2048, 2048, 2048};   // raw 0..4095
+    volatile uint32_t knob_waiting = 0;               // bit per knob: waiting for pickup
+    volatile uint32_t down_held = 0;
+    volatile int32_t transpose = 0;                   // CV In 1, semitones
 };
 
 class TrackerEngine {
@@ -200,7 +205,7 @@ public:
         if (row) row_flash_ = seq_.pos().row % 4 == 0 ? 150 : 0;   // 50 ms in LED ticks
         out.leds_valid = (tick_ & 15) == 3;   // staggered against panel and status work
         if (out.leds_valid) update_leds(out);
-        if ((++tick_ & 63) == 5) publish(m_decay, m_color, m_filter, in.clock_connected);
+        if ((++tick_ & 63) == 5) publish(m_decay, m_color, m_filter, in);
     }
 
 private:
@@ -252,8 +257,12 @@ private:
         if (e.fx == FxDecay) decay = e.fxv;
         if (e.fx == FxParamA) pa = e.fxv;
         if (e.fx == FxParamB) pb = e.fxv;
-        a.decay = static_cast<uint8_t>(clampi(decay + m_decay, 0, 127));
-        a.a = static_cast<uint8_t>(clampi(pa + m_color, 0, 127));
+        // Macros are offsets on top of the song value (never stored), and only
+        // for the voices routed to them in the song header.
+        if (macro_on(*live_, MacroDecay, e.track)) decay += m_decay;
+        if (macro_on(*live_, MacroColour, e.track)) pa += m_color;
+        a.decay = static_cast<uint8_t>(clampi(decay, 0, 127));
+        a.a = static_cast<uint8_t>(clampi(pa, 0, 127));
         a.b = static_cast<uint8_t>(pb);
         v.trigger(a);
         hit_[e.track] = 4095;
@@ -287,7 +296,12 @@ private:
         }
     }
 
-    void publish(int md, int mc, int mf, bool ext) {
+    void publish(int md, int mc, int mf, const EngineIn& in) {
+        const bool ext = in.clock_connected;
+        for (int k = 0; k < 3; ++k) status_.knob[k] = in.knobs[k];
+        status_.knob_waiting = static_cast<uint32_t>(panel_.waiting_mask());
+        status_.down_held = panel_.down_held() ? 1u : 0u;
+        status_.transpose = transpose_;
         const Position& p = seq_.pos();
         status_.mode = static_cast<uint32_t>(seq_.mode());
         status_.entry = p.entry;

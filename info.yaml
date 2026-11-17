@@ -3,10 +3,10 @@ Name: Workshop Tracker
 short-description: Tracker sequencer with 4 drum synths, 2 CV/gate tracks and a WebMIDI editor.
 Language: C++ (Pico SDK + ComputerCard)
 Creator: Workshop Tracker contributors
-Version: "0.1.0"
+Version: "0.2.0"
 Status: Experimental (untested on hardware)
 date-created: 2026-11-15
-date-updated: 2026-11-15
+date-updated: 2026-11-16
 license: MIT
 
 tags:
@@ -23,17 +23,17 @@ summary: |
 
 uf2:
   - path: dist/workshop_tracker.uf2
-    name: Workshop Tracker 0.1.0
+    name: Workshop Tracker 0.2.0
 
 panel:
   inputs:
     - id: AudioIn1
-      name: VCO 1 in
-      description: Mixer channel 5, with optional VCA following CV/gate track 1
+      name: IN1
+      description: Mixer channel IN1 (e.g. VCO 1), with optional VCA following CV/gate track 1
       type: audio
     - id: AudioIn2
-      name: VCO 2 in
-      description: Mixer channel 6, with optional VCA following CV/gate track 2
+      name: IN2
+      description: Mixer channel IN2 (e.g. VCO 2), with optional VCA following CV/gate track 2
       type: audio
     - id: CVIn1
       name: Transpose
@@ -91,10 +91,10 @@ controls:
   knobs:
     - main:
         name: Decay / Slot
-        description: Decay macro (Perform) or song slot (Select)
+        description: Decay macro on the routed drum voices (Perform) or song slot (Select)
       x:
         name: Colour / Tempo
-        description: Param A macro (Perform) or tempo 40-240 BPM (Select)
+        description: Param A macro on the routed drum voices (Perform) or tempo 40-240 BPM (Select)
       y:
         name: Filter / Swing
         description: Master filter LP-HP (Perform) or swing 50-75 % (Select)

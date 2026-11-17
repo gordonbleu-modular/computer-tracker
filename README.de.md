@@ -21,11 +21,14 @@ dazu ein **Browser-Editor**, der das Modul über USB steuert.
   Part / Stop mit dem Z-Schalter, Makro-Regler, externe Clock & Reset,
   CV-Modulation.
 
-> **Status: noch nicht auf echter Hardware getestet.** Die Firmware baut,
-> die Engine ist durch Host-Unit-Tests und einen Emulator-Benchmark
-> abgedeckt, und der Editor wird gegen den Protokoll-Code der Firmware
-> getestet. Auf einem echten Computer lief die UF2 aber noch nicht. Siehe
-> [Bekannte Risiken](#bekannte-risiken).
+> **Status:** Version 0.1 lief auf einem echten Computer: USB-Verbindung,
+> Klangerzeugung und Panel-Steuerung funktionieren. Die Neuerungen in 0.2
+> (Knopf-Rückmeldung, Makro-Zuordnung, neues Editor-Design) sind durch
+> Host-Tests, einen JS↔Firmware-Abgleich und Browser-Tests gegen ein
+> simuliertes Modul abgedeckt, **liefen aber noch nicht auf Hardware**.
+> Siehe [Bekannte Risiken](#bekannte-risiken).
+
+![Editor: Tracker-Raster und Drum-Module](docs/screenshot-voices-1366x768.png)
 
 English: [README.md](README.md)
 
@@ -63,7 +66,24 @@ exportieren/importieren.
 | Werkzeugleiste | Songname, Flash-Slot laden/speichern, vom Modul lesen / ans Modul senden, Neu, Demo, Export/Import, Oktave, Schrittweite, Edit-Modus, Follow |
 | Links | Song-Arrangement (Pattern × Wiederholungen, ▶ startet bzw. springt zu einem Eintrag), Pattern-Auswahl & -Länge, Kopieren/Einfügen/Löschen, Effekt-Hilfe |
 | Mitte | das Tracker-Raster |
-| Rechts | Stimmen (Engine, Decay, A, B, Tune, Velocity-Empfindlichkeit), CV-Spuren, Mixer mit Pegelanzeige |
+| Links unten | **Computer · Live**: die Regler Main/X/Y und die Z-Stellung des Moduls in Echtzeit |
+| Rechts, Tab **Drum voices** | vier Module im Eurorack-Stil: Engine, Zuordnungs-Tasten **MAIN** / **X**, Drehregler Decay, A, B, Tune, Vel; die rote LED leuchtet bei jedem Schlag |
+| Rechts, Tab **Mixer** | DR1–DR4, **IN1**, **IN2** (Audio-Eingänge) und Master: Level, Pan, Drive, Tone, Gate-VCA (Eingänge), Mute, Pegel, Master-Filter |
+| Rechts, Tab **CV / Gate** | Gate-Länge, Glide, Transponierung der CV-Spuren, 0-V-Note |
+
+**Drehregler:** hoch/runter ziehen (Shift = fein), Mausrad, Doppelklick
+setzt zurück, mit Fokus auch Pfeiltasten / Bild↑↓ / Pos1 / Ende.
+
+**Rückmeldung vom Modul (ab Firmware 0.2):** Die PERFORM-Makros des Moduls
+sind **Offsets** auf die Werte im Song und werden nie gespeichert. Im Editor
+zeigt der **goldene Bogen** den Song-Wert und ein **roter Bogen mit Punkt**,
+was das Modul gerade spielt (Decay über Main, Parameter A über X,
+Master-Filter über Y + CV In 2). Tempo, Swing, Slot und Position vom Panel
+werden live angezeigt. Pro Drum-Voice legen **MAIN** und **X** fest, ob das
+Main- bzw. X-Makro auf diese Voice wirkt. Die Zuordnung wird im Song
+gespeichert.
+
+![Mixer-Tab](docs/screenshot-mixer-1366x768.png)
 
 **Tasten** (*Keys* in der App zeigt alle): Klaviatur auf `Y/Z S X D C V…`
 (untere Oktave; die Tasten werden nach Position erkannt, deutsches Layout
@@ -92,7 +112,7 @@ FPU), Hüllkurven und Koeffizienten mit Control-Rate (alle 8 Samples).
 | Buchse | Funktion |
 | --- | --- |
 | Audio Out 1/2 | Stereo-Mix L/R |
-| Audio In 1/2 | VCO 1/2 in Mixer-Kanal 5/6 (Gate-VCA optional) |
+| Audio In 1/2 | Mixer-Kanäle **IN1 / IN2** (z. B. die VCOs), Gate-VCA optional |
 | CV Out 1/2 | 1 V/Okt der CV-Spuren 1/2 (kalibriert) |
 | Pulse Out 1/2 | Gates der CV-Spuren 1/2 |
 | Pulse In 1 | Clock-Eingang, 1 Puls = 1 Zeile (ersetzt die interne Clock, solange gesteckt) |
@@ -102,7 +122,7 @@ FPU), Hüllkurven und Koeffizienten mit Control-Rate (alle 8 Samples).
 
 | Z | Main | X | Y |
 | --- | --- | --- | --- |
-| **Mitte** (PERFORM) | Decay-Makro | Farbe-Makro (Parameter A) | Master-Filter LP ↔ HP |
+| **Mitte** (PERFORM) | Decay-Makro (zugeordnete Voices) | Farbe-Makro (Parameter A, zugeordnete Voices) | Master-Filter LP ↔ HP |
 | **Oben** (SELECT) | Song-Slot 1–6 | Tempo 40–240 | Swing 50–75 % |
 | **Unten** (tastend) | kurz: Start / nächster Part · 0,8 s halten: Stop | | |
 
@@ -134,16 +154,18 @@ mit g++ und `node --test`).
 * kein Delay/Reverb (das CPU-Budget ging an die Stimmen);
 * nur USB-**Device**-Modus (keine USB-MIDI-Keyboards direkt am Modul);
 * externe Clock fest **1 Puls = 1 Zeile**;
-* Panel-Makros wirken auf neue Anschläge, nicht auf klingende Noten;
+* Decay-/Farbe-Makros wirken auf neue Anschläge, nicht auf klingende Noten;
+* die Reglerstellungen des Moduls werden im Editor angezeigt, lassen sich dort aber nicht verstellen (es sind echte Potis);
 * kein Mute/Solo im Raster (Mixer-Mute benutzen), kein Undo;
 * Song-Wechsel am Panel nur zwischen den 6 gespeicherten Slots;
 * der Eigenverbrauch von ComputerCard ist geschätzt, nicht gemessen.
 
 ## Bekannte Risiken
 
-* **Noch nicht auf Hardware getestet.** USB-Erkennung, Flash-Schreiben bei
-  laufendem Audio, 192 MHz / 1,15 V, Regler-/Schaltergefühl und die absoluten
-  Pegel müssen erst am echten Modul geprüft werden.
+* 0.1 wurde auf Hardware bestätigt (USB, Klang, Panel). Die Rückmeldungen,
+  die Makro-Zuordnung und das neue Design von **0.2** wurden nur simuliert
+  getestet. Flash-Schreiben bei laufendem Audio und die Langzeitstabilität bei
+  192 MHz / 1,15 V brauchen noch mehr Praxis.
 * Der extreme CPU-Worst-Case liegt nahe am Limit. Bei Knacksern die
   CPU-Anzeige im Editor prüfen.
 * Speichern überschreibt den Slot. Fällt dabei der Strom aus, ist dieser Slot
