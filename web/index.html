@@ -50,7 +50,7 @@
   </div>
   <div class="group">
     <label>OCT <select id="octave"></select></label>
-    <label>STEP <select id="step"></select></label>
+    <label title="Step jump: how many rows the cursor moves after you enter a note or value (0 = stay on the row)">STEP JUMP <select id="step"></select></label>
     <label><input id="editMode" type="checkbox" checked> EDIT</label>
     <label><input id="follow" type="checkbox" checked> FOLLOW</label>
     <button id="btnHelp">Keys</button>
@@ -91,7 +91,7 @@
     <nav class="tabs" role="tablist">
       <button role="tab" id="tabVoices" data-tab="voices" aria-selected="true">Drum voices</button>
       <button role="tab" id="tabMixer" data-tab="mixer" aria-selected="false">Mixer</button>
-      <button role="tab" id="tabCv" data-tab="cv" aria-selected="false">CV / Gate</button>
+      <button role="tab" id="tabCv" data-tab="cv" aria-selected="false">CV / IN</button>
     </nav>
     <section id="pane-voices" class="pane" role="tabpanel" aria-labelledby="tabVoices">
       <div id="voices" class="rack"></div>
@@ -103,6 +103,7 @@
     </section>
     <section id="pane-cv" class="pane" role="tabpanel" aria-labelledby="tabCv" hidden>
       <div id="cvpanel" class="rack"></div>
+      <div class="legend"><span class="sw gold"></span>song value <span class="sw red"></span>live Main / X macro (when MAIN / X is lit)</div>
     </section>
   </aside>
 </main>
@@ -117,13 +118,14 @@
     <tr><td>Tab / Shift+Tab</td><td>next / previous track</td></tr>
     <tr><td>Z S X D C V G B H N J M , L .</td><td>notes (lower octave)</td></tr>
     <tr><td>Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P</td><td>notes (upper octave)</td></tr>
-    <tr><td>1</td><td>OFF (CV: gate off, drum: choke)</td></tr>
-    <tr><td>0-9 A-F</td><td>hex digits in the velocity and effect value columns</td></tr>
-    <tr><td>A B D G S R P K</td><td>effect letter in the effect column</td></tr>
+    <tr><td>1</td><td>OFF (CV: gate off, drum: choke, IN: close VCA)</td></tr>
+    <tr><td>0-9</td><td>values 00-99 in the VEL and effect value columns: one digit = 0-9, a second one makes two digits (7 5 = 75)</td></tr>
+    <tr><td>Shift+↑ / ↓, Shift+PgUp / PgDn</td><td>value ±1 / ±10 (note column: semitone / octave)</td></tr>
+    <tr><td>Enter or click on FX</td><td>list of effects for this track (or type the letter: A B D G S R P K)</td></tr>
     <tr><td>Delete / Backspace</td><td>clear field (whole cell in the note column)</td></tr>
     <tr><td>- / =</td><td>octave down / up</td></tr>
     <tr><td>Space</td><td>play pattern / stop</td></tr>
-    <tr><td>Enter</td><td>play song</td></tr>
+    <tr><td>Enter (NOTE / VEL column)</td><td>play song</td></tr>
     <tr><td>Ctrl+C / Ctrl+V</td><td>copy / paste the track in this pattern</td></tr>
   </table>
   <h3>Knobs</h3>
@@ -135,12 +137,13 @@
   </table>
   <p class="dim">Keys follow the physical US layout, so on a German keyboard the bottom row starts at Y.
   Gold arc = value stored in the song. Red arc and dot = what the module plays right now with its PERFORM
-  macros (Main = decay, X = colour, Y + CV&nbsp;in&nbsp;2 = filter). Macros are offsets and are never saved.</p>
+  macros (Main = decay / CV gate length / IN VCA decay, X = colour / glide / IN drive, Y + CV&nbsp;in&nbsp;2 = filter). Macros are offsets and are never saved.</p>
   <form method="dialog"><button>Close</button></form>
 </dialog>
 
-<footer class="foot dim">
-  Synths run on the module. This page only edits and controls it. Chrome or Edge over https:// or http://localhost; allow MIDI/SysEx when asked.
+<footer class="foot">
+  <span id="statusLine" class="statusline" aria-live="polite"></span>
+  <span class="dim" title="Synths run on the module. This page only edits and controls it. Chrome or Edge over https:// or http://localhost; allow MIDI/SysEx when asked.">Keys: see the Keys button</span>
 </footer>
 <script type="module" src="js/app.js"></script>
 </body>

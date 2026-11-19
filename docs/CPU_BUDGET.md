@@ -32,13 +32,38 @@ tools/cpu_bench/build.sh
 python3 tools/cpu_bench/run_bench.py tools/cpu_bench/bench.elf 4800 [--profile]
 ```
 
-## Results (engine only, cycles per sample, 4800 samples = 100 ms; firmware 0.2.0)
+## Results (engine only, cycles per sample, 4800 samples = 100 ms; firmware 0.3.1)
 
 | Scenario | avg | p99 | max | max % of 4000 |
 | --- | ---: | ---: | ---: | ---: |
-| Idle (stopped, inputs connected) | 1155 | 1352 | 1352 | 34 % |
-| Demo song playing (4 drums, 2 CV tracks, both inputs, all FX) | 1555 | 1781 | 1886 | 47 % |
-| Pathological: 4 voices alternating Snare/Modal at max decay, ratchet ×4 on every row at 300 BPM, all mixer FX, both inputs | 2836 | 3122 | 3718 | 93 % |
+| Idle (stopped, inputs connected) | 1208 | 1470 | 1549 | 39 % |
+| Demo song playing (4 drums, 2 CV tracks, IN1 track, both inputs, effects) | 1610 | 1954 | 1982 | 50 % |
+| Pathological: 4 voices alternating Snare/Modal at max decay, an effect on every row of all 8 tracks at 300 BPM (drums ratchet ×4, CV1 slide, CV2 ratchet ×3, IN1 ratchet ×4, IN2 ratchet ×8), IN2 following CV2, all mixer FX | 2919 | 3307 | 3711 | 93 % |
+
+For comparison (avg / max): firmware 0.3.0 (two effects per step) idle 1207 / 1548,
+demo 1608 / 2044, pathological 2923 / 3708; firmware 0.2.0 (6 tracks) idle
+1155 / 1352, demo 1555 / 1886, pathological 2836 / 3718.
+
+### What 0.3.x (8 tracks, IN tracks) costs, and what removing FX2 gave back
+
+* **CPU:** 8 tracks cost about +50 cycles average (+1.3 % of the core) over 0.2
+  in every scenario: two more tracks to read and the IN VCAs with their own
+  envelopes. Removing the second effect column in 0.3.1 changes the CPU
+  numbers only within noise: the extra effect was a few compares per row read,
+  and the worst case is set by the voices and the mixer.
+* **Busy-sample deferral (kept):** re-measured for 0.3.1 with the deferral
+  disabled, the pathological case was 2898 avg / 3865 max (96.6 %), with it
+  2919 / 3711 (92.8 %). It costs about 20 cycles on average but takes ≈150
+  cycles off the worst single sample, which is the number that matters.
+* **RAM:** a song is 32,980 bytes (0.3.0: 49,364; 0.2: 24,788), and the firmware
+  keeps two (live + spare for glitch-free loading). RAM use is **155.6 KB of
+  256 KB (59 %)**, down from 188.5 KB (72 %) in 0.3.0.
+* **Flash:** firmware image 65 KB. A slot record is 32,996 bytes, written as
+  9 sectors (36 KB) per save. The slots keep 0.3.0's 52 KB spacing so that songs
+  saved with 0.3.0 can still be loaded; 6 slots plus the untouched 0.2 slots
+  reserve 484 KB at the top of the 2 MB flash.
+* **USB:** a full dump or upload is 512 messages of 73 bytes (≈37 KB; 0.3.0:
+  ≈53 KB, 0.2: 384 messages, ≈28 KB).
 
 Add **≈150 cycles** for the `ProcessSample()` wrapper (I/O mapping, SysTick,
 LEDs) and an estimated **400–700 cycles** for ComputerCard (not measured; it
@@ -68,6 +93,13 @@ built and rate-limited on core 1.
 * The sequencer reads **one track every other sample**, and at most **one drum
   trigger per sample** is started (a queue absorbs ratchets/simultaneous hits;
   worst case 4 samples ≈ 83 µs of skew).
+* (v3) Ratchets, delays and gate ends are **timestamps** (one compare per sample
+  instead of per-track counters), and at most **one scheduled event fires per
+  sample**; a second one due on the same sample waits one sample (21 µs).
+* (v3) On a **busy sample** (a voice was triggered or the sequencer read a row)
+  the mixer coefficient update and the input VCA control step are skipped; a
+  guard runs them anyway after 32 busy samples in a row. The input VCA control
+  runs every 4th sample with per-sample ramps.
 * The Modal engine computes its three resonator coefficients **one per
   sample** after a hit.
 * Silent voices and **unplugged audio inputs are skipped** entirely.

@@ -1,12 +1,12 @@
 draft: true
 Name: Workshop Tracker
-short-description: Tracker sequencer with 4 drum synths, 2 CV/gate tracks and a WebMIDI editor.
+short-description: Tracker sequencer with 4 drum synths, 2 CV/gate tracks, 2 audio-in VCA tracks and a WebMIDI editor.
 Language: C++ (Pico SDK + ComputerCard)
 Creator: Workshop Tracker contributors
-Version: "0.2.0"
+Version: "0.3.1"
 Status: Experimental (untested on hardware)
 date-created: 2026-11-15
-date-updated: 2026-11-16
+date-updated: 2026-11-19
 license: MIT
 
 tags:
@@ -19,21 +19,21 @@ tags:
   - web-editor
 
 summary: |
-  A tracker sequencer with four on-board drum synth voices (Kick, Karplus-Strong pluck, pitched noise, FM metal, modal resonator, snare/clap), a stereo mixer, and two CV/gate tracks for the Workshop System VCOs, whose audio comes back in through the audio inputs. Songs are edited in a browser (Chrome/Edge) over USB-MIDI SysEx and stored in six flash slots; without a computer the card is played from the panel (slots, next part, macros, external clock and reset).
+  A tracker sequencer with four on-board drum synth voices (Kick, Karplus-Strong pluck, pitched noise, FM metal, modal resonator, snare/clap), a stereo mixer, two CV/gate tracks for the Workshop System VCOs, and two IN tracks that play the VCAs on the audio inputs (where the VCO audio comes back in). Each step has a note, a velocity and one effect. Songs are edited in a browser (Chrome/Edge) over USB-MIDI SysEx and stored in six flash slots; without a computer the card is played from the panel (slots, next part, macros, external clock and reset).
 
 uf2:
   - path: dist/workshop_tracker.uf2
-    name: Workshop Tracker 0.2.0
+    name: Workshop Tracker 0.3.1
 
 panel:
   inputs:
     - id: AudioIn1
       name: IN1
-      description: Mixer channel IN1 (e.g. VCO 1), with optional VCA following CV/gate track 1
+      description: Mixer channel IN1 (e.g. VCO 1) through a VCA played by the IN1 track or by CV/gate track 1
       type: audio
     - id: AudioIn2
       name: IN2
-      description: Mixer channel IN2 (e.g. VCO 2), with optional VCA following CV/gate track 2
+      description: Mixer channel IN2 (e.g. VCO 2) through a VCA played by the IN2 track or by CV/gate track 2
       type: audio
     - id: CVIn1
       name: Transpose
@@ -84,17 +84,17 @@ controls:
       description: Main = song slot 1-6, X = tempo, Y = swing
     middle:
       name: Perform
-      description: Main = decay macro, X = colour macro, Y = master filter
+      description: Main = decay macro (drums, CV gate length, IN VCA decay), X = colour macro (drums, CV glide, IN drive), Y = master filter
     down:
       name: Start / next / stop
       description: Tap to start or jump to the next part at the end of the pattern; hold 0.8 s to stop
   knobs:
     - main:
         name: Decay / Slot
-        description: Decay macro on the routed drum voices (Perform) or song slot (Select)
+        description: Decay macro on the routed drum voices, CV gate length and IN VCA decay (Perform) or song slot (Select)
       x:
         name: Colour / Tempo
-        description: Param A macro on the routed drum voices (Perform) or tempo 40-240 BPM (Select)
+        description: Param A macro on the routed drum voices, CV glide and IN drive (Perform) or tempo 40-240 BPM (Select)
       y:
         name: Filter / Swing
         description: Master filter LP-HP (Perform) or swing 50-75 % (Select)

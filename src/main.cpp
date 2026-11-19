@@ -1,4 +1,4 @@
-// Workshop Tracker — a 6-track tracker sequencer with 4 drum-synth voices for
+// Workshop Tracker — an 8-track tracker sequencer with 4 drum-synth voices for
 // the Music Thing Modular Workshop System Computer, edited live from a web
 // page over USB MIDI SysEx and playable standalone.
 //
@@ -130,7 +130,10 @@ public:
         slot = static_cast<uint8_t>(g_engine.status().slot);
         mask = 0;
         for (int i = 0; i < trk::store::kSlots; ++i)
-            if (trk::store::slot_valid(flash_ptr(trk::store::slot_offset(kFlashSize, i)))) mask |= static_cast<uint8_t>(1u << i);
+            if (trk::store::slot_valid(flash_ptr(trk::store::slot_offset(kFlashSize, i))) ||
+                trk::store::slot_valid_v030(flash_ptr(trk::store::slot_offset(kFlashSize, i))) ||
+                trk::store::slot_valid_v2(flash_ptr(trk::store::v2_slot_offset(kFlashSize, i))))
+                mask |= static_cast<uint8_t>(1u << i);
     }
 
     void pinged() override {
@@ -165,14 +168,28 @@ void service_usb() {
     }
 }
 
-// Wait until core 0 has performed every swap we asked for.
+// Wait until core 0 has performed (or cancelled) every swap we asked for.
 void wait_swap_idle() {
     while (g_engine.status().swap_count != g_swaps_requested || !g_engine.swap_idle()) service_usb();
 }
 
-void request_swap(bool immediate) {
+void push_cmd(const trk::Command& c) {
+    while (!g_engine.commands().push(c)) service_usb();
+}
+
+// Free the spare buffer: a song change still waiting for the pattern end is
+// dropped (a newer choice replaces it). Never waits for the music, so a
+// stopped external clock cannot hang core 1.
+void free_spare() {
+    if (!g_engine.swap_idle()) push_cmd(trk::Command{trk::CmdType::CancelSwap, 0, 0, 0});
+    wait_swap_idle();
+}
+
+// slot: 0..5 = the song belongs to that slot once swapped in, -1 = keep.
+void request_swap(bool immediate, int slot) {
     ++g_swaps_requested;
-    while (!g_engine.commands().push(trk::Command{trk::CmdType::SwapSong, static_cast<uint8_t>(immediate ? 1 : 0), 0, 0})) service_usb();
+    push_cmd(trk::Command{trk::CmdType::SwapSong, static_cast<uint8_t>(immediate ? 1 : 0),
+                          static_cast<uint8_t>(slot + 1), 0});
 }
 
 bool __not_in_flash_func(write_slot)(int slot, const trk::Song& s) {
@@ -215,8 +232,16 @@ void __not_in_flash_func(write_sys_slot)(int slot) {
 
 // Load slot (or a fresh song) into the spare buffer and swap it in.
 // kind: 0..5 = slot, 100 = empty song, 101 = demo.
+bool load_slot(int slot, trk::Song& out) {
+    using namespace trk::store;
+    // v3 record, else the v0.1/v0.2 record migrated to 8 tracks.
+    if (slot_load_any(flash_ptr(slot_offset(kFlashSize, slot)), flash_ptr(v2_slot_offset(kFlashSize, slot)), out)) return true;
+    if (slot == 0) { trk::song_demo(out); return true; }   // slot 1 falls back to the demo
+    return false;
+}
+
 bool load_into_spare_and_swap(int kind, bool immediate) {
-    wait_swap_idle();
+    free_spare();
     trk::Song* sp = g_engine.spare();
     bool ok = true;
     if (kind == 100) {
@@ -224,14 +249,11 @@ bool load_into_spare_and_swap(int kind, bool immediate) {
     } else if (kind == 101) {
         trk::song_demo(*sp);
     } else {
-        ok = trk::store::slot_load(flash_ptr(trk::store::slot_offset(kFlashSize, kind)), *sp);
-        if (!ok && kind == 0) { trk::song_demo(*sp); ok = true; }   // slot 1 falls back to the demo
+        ok = load_slot(kind, *sp);
     }
     if (!ok) return false;
-    request_swap(immediate);
-    if (kind < trk::store::kSlots) {
-        g_engine.commands().push(trk::Command{trk::CmdType::SetSlot, static_cast<uint8_t>(kind), 0, 0});
-    }
+    // The slot number follows the song: core 0 sets it when the swap happens.
+    request_swap(immediate, kind < trk::store::kSlots ? kind : -1);
     return true;
 }
 
@@ -245,7 +267,7 @@ void run_job() {
     case J::Save: {
         // Snapshot the live song into the spare buffer first so the CRC
         // matches what we write even if the panel changes the tempo meanwhile.
-        wait_swap_idle();
+        free_spare();
         trk::Song* snap = g_engine.spare();
         std::memcpy(snap, g_engine.live(), sizeof(trk::Song));
         g_engine.set_busy(true);
@@ -310,12 +332,23 @@ void core1_main() {
     while (true) {
         service_usb();
         run_job();
-        // Song slot chosen on the panel: load at the end of the pattern.
+        // Song slot chosen on the panel: load at the end of the pattern
+        // (at once while stopped). A newer choice replaces a waiting one.
+        static int remember = -1;
         const int s = g_engine.take_slot_request();
         if (s >= 0) {
             if (load_into_spare_and_swap(s, false)) {
-                // Remember it once the swap has happened (handled lazily).
+                remember = s;
+            } else {
+                // Empty slot: put the panel back on the slot that is playing,
+                // so turning back to it selects it again.
+                push_cmd(trk::Command{trk::CmdType::SetSlot, static_cast<uint8_t>(g_engine.status().slot), 0, 0});
             }
+        }
+        // Remember the panel's slot for the next power-up once it plays.
+        if (remember >= 0 && g_engine.swap_idle() && g_engine.status().swap_count == g_swaps_requested) {
+            if (static_cast<int>(g_engine.status().slot) == remember) write_sys_slot(remember);
+            remember = -1;
         }
         send_status_if_due();
         send_panel_if_due();
@@ -336,9 +369,7 @@ int main() {
 
     // Load the last-used slot (falls back to the demo song).
     const int slot = boot_slot();
-    if (!trk::store::slot_load(flash_ptr(trk::store::slot_offset(kFlashSize, slot)), g_song_a)) {
-        trk::song_demo(g_song_a);
-    }
+    if (!load_slot(slot, g_song_a)) trk::song_demo(g_song_a);
     trk::song_clear(g_song_b);
 
     trk::EngineIn in;

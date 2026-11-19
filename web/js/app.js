@@ -1,8 +1,9 @@
 // Workshop Tracker editor UI.
 // SPDX-License-Identifier: MIT
 import {
-  K, Song, msg, decode, DumpCollector, uploadMessages, demoSong, noteName, hex2, clamp,
-  ENGINES, MATERIALS, FX, NOTE_OFF, NOTE_EMPTY, PROTOCOL_VERSION, effectiveDrum, effectiveFilter,
+  K, Song, msg, decode, DumpCollector, uploadMessages, demoSong, noteName, clamp,
+  ENGINES, MATERIALS, FX, FX_BY_CODE, fxFor, fxShow, fxStore, velShow, velStore, trackKind,
+  VCA_SRC, VCA_SRC_NAMES, NOTE_OFF, NOTE_EMPTY, PROTOCOL_VERSION, effectiveDrum, effectiveFilter, effectiveCv, effectiveIn,
 } from './protocol.js';
 import { Device } from './midi.js';
 import { Knob } from './knob.js';
@@ -10,16 +11,17 @@ import { Knob } from './knob.js';
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
-const TRACK_NAMES = ['Drum 1', 'Drum 2', 'Drum 3', 'Drum 4', 'CV/Gate 1', 'CV/Gate 2'];
+const TRACK_NAMES = ['Drum 1', 'Drum 2', 'Drum 3', 'Drum 4', 'CV/Gate 1', 'CV/Gate 2', 'IN 1', 'IN 2'];
 const CH_NAMES = ['DR1', 'DR2', 'DR3', 'DR4', 'IN1', 'IN2'];
 const STORE_KEY = 'workshopTracker.song';
 const BACKUP_KEY = 'workshopTracker.backup';
 
 const state = {
   song: loadLocal() || demoSong(),
-  pattern: 0, row: 0, track: 0, sub: 0, // sub: 0 note, 1 vel, 2 fx, 3 fx value
+  pattern: 0, row: 0, track: 0, sub: 0, // sub: 0 note, 1 vel, 2 fx letter, 3 fx value
   octave: 4, step: 1, edit: true, follow: true,
-  hexHi: null,
+  digit: null, // first typed digit of a two-digit value
+  proto: PROTOCOL_VERSION, // of the connected module
   status: null, info: null,
   clipTrack: null, clipPattern: null,
   dump: new DumpCollector(), dumping: false,
@@ -51,77 +53,143 @@ function send(bytes) { if (dev.connected) dev.send(bytes); }
 function changed() { saveLocal(); }
 
 // ------------------------------------------------------------------ grid ---
+// Columns per track: NOTE (3) VEL (2) FX (letter + 2).
+// Values are decimal 00-99 (0-127 inside, see fxShow / velShow).
+const pad2 = (n) => String(n).padStart(2, '0');
+const SUB_LABELS = { drum: ['NOTE', 'VEL', 'FX'], cv: ['NOTE', 'VEL', 'FX'], in: ['TRIG', 'LVL', 'FX'] };
+const SRC_SHORT = ['', 'OPEN', 'CV', 'TRACK'];
 let rowEls = [];
 let headHits = [];
+let colEls = [];   // colEls[t] = track column elements (header + rows), for the open (expanded) track
+let subLabelEls = [];
+function trackTitle(t) {
+  const s = state.song;
+  if (t < K.firstCv) return `DR${t + 1} ${ENGINES[s.drum(t, 0)].name}`;
+  if (t < K.firstIn) return `CV${t - K.firstCv + 1}`;
+  const i = t - K.firstIn, src = s.vcaSource(i);
+  return `IN${i + 1}${src === VCA_SRC.cvGate ? '←CV' : src === VCA_SRC.inTrack ? ' TRK' : ' OPEN'}`;
+}
+function trackLongName(t) {
+  if (t < K.firstCv) return `Drum ${t + 1}: ${ENGINES[state.song.drum(t, 0)].name}`;
+  if (t < K.firstIn) return `CV/gate ${t - K.firstCv + 1}: pitch on CV out ${t - K.firstCv + 1}, gate on pulse out ${t - K.firstCv + 1}`;
+  const i = t - K.firstIn;
+  return `IN ${i + 1}: VCA of audio in ${i + 1}, opened by ${VCA_SRC_NAMES[state.song.vcaSource(i)]}`;
+}
+const fwLacks = (t) => dev.connected && state.proto < 3 && t >= K.v2Tracks;
 function buildGrid() {
   const g = $('grid');
   g.innerHTML = '';
+  closePicker();
   const head = el('div', 'head');
   head.appendChild(el('span', 'num', ''));
-  headHits = [];
+  headHits = []; colEls = []; subLabelEls = [];
   for (let t = 0; t < K.tracks; t++) {
-    const h = el('span', 'trk' + (t >= K.drumTracks ? ' cvh' : ''));
+    const kind = trackKind(t);
+    const h = el('span', `trk k-${kind}`);
+    const top = el('div', 'tname');
     const dot = el('i', 'hit');
     headHits.push(dot);
-    h.appendChild(dot);
-    const label = t < K.drumTracks ? `DR${t + 1} ${ENGINES[state.song.drum(t, 0)].name}` : `CV${t - K.drumTracks + 1} GATE`;
-    h.appendChild(document.createTextNode(label));
+    top.append(dot, document.createTextNode(trackTitle(t)));
+    top.title = trackLongName(t) + (fwLacks(t) ? ' (needs firmware 0.3: the connected module does not play this track)' : '');
+    const sub = el('div', 'subl');
+    const L = SUB_LABELS[kind];
+    const labs = [el('span', 'l n'), el('span', 'l v'), el('span', 'l x')];
+    labs.forEach((x, i) => { x.appendChild(el('i', null, L[i])); sub.appendChild(x); });
+    labs[0].title = kind === 'in' ? 'Trigger: any note key opens the VCA, 1 = OFF closes it' : 'Note: keys Z…M / Q…P, 1 = OFF';
+    labs[1].title = kind === 'drum' ? 'Velocity 01-99 (.. = default)' : kind === 'cv' ? 'Velocity = level of the IN VCA that follows this gate' : 'Level of the VCA 01-99 (.. = full)';
+    labs[2].title = 'Effect: letter + value. Enter or click = list of effects';
+    subLabelEls.push(labs);
+    h.append(top, sub);
     head.appendChild(h);
+    colEls.push([h]);
   }
   g.appendChild(head);
   rowEls = [];
   const len = state.song.patLen(state.pattern);
   for (let r = 0; r < len; r++) {
     const re = el('div', 'r');
-    re.appendChild(el('span', 'num', hex2(r)));
+    re.appendChild(el('span', 'num', pad2(r + 1)));
     const cells = [];
     for (let t = 0; t < K.tracks; t++) {
-      const te = el('span', 'trk');
-      const f = [el('span', 'f n'), el('span', 'f v'), el('span', 'f x'), el('span', 'f xv')];
-      f.forEach((s, i) => {
-        s.dataset.r = r; s.dataset.t = t; s.dataset.s = i;
-        te.appendChild(s);
-        if (i < 3) te.appendChild(document.createTextNode(i === 2 ? '' : ' '));
-      });
+      const te = el('span', `trk k-${trackKind(t)}`);
+      const f = [el('span', 'f n'), el('span', 'f v'), el('span', 'f xl'), el('span', 'f xv')];
+      f.forEach((s, i) => { s.dataset.r = r; s.dataset.t = t; s.dataset.s = i; te.appendChild(s); });
       re.appendChild(te);
       cells.push(f);
+      colEls[t].push(te);
     }
     g.appendChild(re);
     rowEls.push({ el: re, cells });
     for (let t = 0; t < K.tracks; t++) paintCell(r, t);
   }
   if (state.row >= len) state.row = len - 1;
+  g.classList.toggle('oldfw', dev.connected && state.proto < 3);
+  paintSubLabels();
+  openTrack = -1;
   paintCursor(true);
   paintPlayhead();
+  fitGrid();
 }
 
+// The grid font grows to fill the width (8 tracks without horizontal scroll).
+const GRID_PX = [16, 15, 14, 13.5, 13, 12.5, 12, 11.5, 11, 10.5, 10];
+function fitGrid() {
+  const g = $('grid');
+  for (const px of GRID_PX) {
+    g.style.fontSize = `${px}px`;
+    if (g.scrollWidth <= g.clientWidth + 1) return;
+  }
+}
+
+function paintSubLabels() {
+  // CV velocity only matters while the matching IN VCA follows that gate.
+  subLabelEls.forEach((labs, t) => {
+    if (trackKind(t) !== 'cv') return;
+    const i = t - K.firstCv;
+    labs[1].classList.toggle('nv', state.song.vcaSource(i) !== VCA_SRC.cvGate);
+  });
+}
+
+function fxText(code, v) {
+  if (!code) return ['.', '..'];
+  return [String.fromCharCode(code), pad2(fxShow(code, v))];
+}
 function paintCell(r, t) {
   const re = rowEls[r];
   if (!re) return;
   const c = state.song.getCell(state.pattern, t, r);
-  const [n, v, x, xv] = re.cells[t];
-  n.textContent = noteName(c.note);
+  const [n, v, x1, v1] = re.cells[t];
+  const kind = trackKind(t);
+  n.textContent = kind === 'in' && c.note && c.note !== NOTE_OFF ? 'TRG' : noteName(c.note);
   n.classList.toggle('e', c.note === NOTE_EMPTY);
   n.classList.toggle('off', c.note === NOTE_OFF);
-  v.textContent = c.vel ? hex2(c.vel) : '..';
+  const vs = velShow(c.vel);
+  v.textContent = vs < 0 ? '..' : pad2(vs);
   v.classList.toggle('e', !c.vel);
-  x.textContent = c.fx ? String.fromCharCode(c.fx) : '.';
-  x.classList.toggle('e', !c.fx);
-  xv.textContent = c.fx || c.fxv ? hex2(c.fxv) : '..';
-  xv.classList.toggle('e', !c.fx && !c.fxv);
+  v.classList.toggle('nv', kind === 'cv' && state.song.vcaSource(t - K.firstCv) !== VCA_SRC.cvGate);
+  const [a1, b1] = fxText(c.fx, c.fxv);
+  x1.textContent = a1; v1.textContent = b1;
+  x1.classList.toggle('e', !c.fx); v1.classList.toggle('e', !c.fx);
 }
 
 let lastCursor = null;
+let openTrack = -1;
 function paintCursor(scroll) {
   if (lastCursor) lastCursor.classList.remove('c');
   const re = rowEls[state.row];
   rowEls.forEach((x, i) => x.el.classList.toggle('cur', i === state.row));
+  if (openTrack !== state.track) {
+    if (colEls[openTrack]) colEls[openTrack].forEach((e) => e.classList.remove('open'));
+    if (colEls[state.track]) colEls[state.track].forEach((e) => e.classList.add('open'));
+    openTrack = state.track;
+  }
   if (!re) return;
   const s = re.cells[state.track][state.sub];
   s.classList.add('c');
   lastCursor = s;
   if (scroll) s.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   showFxHelp();
+  showStatusLine();
   selectVoicePanel(state.track);
 }
 
@@ -132,26 +200,153 @@ function paintPlayhead() {
   if (playing && state.follow && rowEls[st.row]) rowEls[st.row].el.scrollIntoView({ block: 'nearest' });
 }
 
+// Legend of the effects for the kind of track under the cursor.
+let legendKind = null;
 function showFxHelp() {
-  const isCv = state.track >= K.drumTracks;
-  const lines = Object.entries(FX).filter(([, f]) => (isCv ? f.cv : f.drum)).map(([k, f]) => `<div><b>${k}</b> ${f.help}</div>`);
-  $('fxHelp').innerHTML = `<summary>FX column · ${isCv ? 'CV track' : 'drum track'}</summary>${lines.join('')}` +
-    (isCv ? '<div class="dim">Velocity is ignored on CV tracks. Notes hold until the gate length (voice setting) or OFF.</div>'
-          : '<div class="dim">Velocity .. = 100 (hex 64). OFF chokes the voice.</div>');
+  const kind = trackKind(state.track);
+  if (kind === legendKind) return;
+  legendKind = kind;
+  const box = $('fxHelp');
+  const open = box.open;
+  box.innerHTML = '';
+  box.appendChild(el('summary', null, `Effects · ${kind === 'drum' ? 'drum' : kind === 'cv' ? 'CV/gate' : 'IN (VCA)'} track`));
+  const list = el('div', 'fxlist');
+  for (const [l, f] of fxFor(state.track)) {
+    const d = el('div');
+    d.title = f.help + (f.val === 'pct' ? ' Value 00-99.' : ` Value ${pad2(f.min)}-${pad2(f.max)}.`);
+    d.append(el('b', null, l), document.createTextNode(f.name));
+    list.appendChild(d);
+  }
+  box.appendChild(list);
+  box.appendChild(el('div', 'dim', 'Enter or click an FX cell for the list. One effect per step.'));
+  box.open = open;
+}
+
+// One line under the grid that explains the field under the mouse or cursor.
+let hoverField = null;
+function describeField(r, t, sub) {
+  const c = state.song.getCell(state.pattern, t, r);
+  const kind = trackKind(t);
+  const where = `${trackTitle(t)} · row ${pad2(r + 1)} · `;
+  if (sub === 0) {
+    if (kind === 'in') return where + (c.note === NOTE_OFF ? 'OFF: closes the VCA' : c.note ? 'TRIG: opens the VCA for the hold time (IN module)' : 'TRIG: any note key opens the VCA, 1 = OFF');
+    return where + `NOTE ${noteName(c.note)}` + (kind === 'drum' ? ' · 1 = OFF chokes the voice' : ' · 1 = OFF closes the gate');
+  }
+  if (sub === 1) {
+    const vs = velShow(c.vel);
+    const val = vs < 0 ? '.. (default)' : pad2(vs);
+    if (kind === 'drum') return where + `VEL ${val}: how hard the voice is hit (.. = 79)`;
+    if (kind === 'in') return where + `LVL ${val}: VCA level for this trigger (.. = full)`;
+    const i = t - K.firstCv;
+    return where + `VEL ${val}: level of the IN${i + 1} VCA` + (state.song.vcaSource(i) === VCA_SRC.cvGate ? '' : ` (no effect: IN${i + 1} does not follow CV${i + 1}, see the CV / IN tab)`);
+  }
+  const f = FX_BY_CODE[c.fx];
+  if (!f) return where + `FX empty · Enter or click for the list, or type ${fxFor(t).map(([l]) => l).join(' ')}`;
+  return where + `FX ${f.letter}${pad2(fxShow(c.fx, c.fxv))} = ${f.name}: ${f.help}`;
+}
+function showStatusLine() {
+  const f = hoverField;
+  $('statusLine').textContent = f ? describeField(+f.dataset.r, +f.dataset.t, +f.dataset.s) : describeField(state.row, state.track, state.sub);
+}
+
+// ------------------------------------------------------------ FX picker ---
+const picker = { el: null, items: [], idx: 0, r: 0, t: 0 };
+function openPicker(r, t, anchor) {
+  closePicker();
+  const c = state.song.getCell(state.pattern, t, r);
+  const cur = c.fx;
+  const box = el('div', 'picker');
+  box.setAttribute('role', 'listbox');
+  box.appendChild(el('div', 'ptitle', `FX · ${trackTitle(t)} · row ${pad2(r + 1)}`));
+  const entries = [...fxFor(t).map(([l, f]) => ({ l, f })), { l: null }];
+  picker.items = entries.map((e, i) => {
+    const b = el('button', 'pitem');
+    b.setAttribute('role', 'option');
+    if (e.l) {
+      b.append(el('b', null, e.l), el('span', 'pname', e.f.name), el('span', 'phelp', e.f.help));
+      if (e.f.code === cur) b.classList.add('cur');
+    } else {
+      b.append(el('b', null, '·'), el('span', 'pname', 'None'), el('span', 'phelp', 'Remove this effect'));
+    }
+    b.onmousedown = (ev) => { ev.preventDefault(); pickFx(e.l); };
+    b.onmousemove = () => { picker.idx = i; paintPicker(); };
+    box.appendChild(b);
+    return b;
+  });
+  picker.idx = Math.max(0, entries.findIndex((e) => e.f && e.f.code === cur));
+  picker.r = r; picker.t = t;
+  picker.el = box;
+  document.body.appendChild(box);
+  const a = anchor.getBoundingClientRect();
+  const w = box.offsetWidth, h = box.offsetHeight;
+  box.style.left = `${Math.max(4, Math.min(innerWidth - w - 4, a.left))}px`;
+  box.style.top = `${a.bottom + h + 4 < innerHeight ? a.bottom + 2 : Math.max(4, a.top - h - 2)}px`;
+  paintPicker();
+}
+function paintPicker() { picker.items.forEach((b, i) => b.classList.toggle('sel', i === picker.idx)); }
+function closePicker() { if (picker.el) { picker.el.remove(); picker.el = null; } }
+function pickFx(letter) {
+  const { r, t } = picker;
+  closePicker();
+  setFx(r, t, letter);
+  $('grid').focus();
+}
+function setFx(r, t, letter) {
+  const c = state.song.getCell(state.pattern, t, r);
+  if (!letter) { setCell(r, t, { ...c, fx: 0, fxv: 0 }, false); return; }
+  const f = FX[letter];
+  const keep = c.fx === f.code;
+  setCell(r, t, { ...c, fx: f.code, fxv: keep ? c.fxv : defaultFxValue(letter) }, false);
+  if (state.row === r && state.track === t) { state.sub = 3; paintCursor(false); }
+}
+function onPickerKey(e) {
+  const n = picker.items.length;
+  switch (e.code) {
+    case 'ArrowDown': picker.idx = (picker.idx + 1) % n; paintPicker(); break;
+    case 'ArrowUp': picker.idx = (picker.idx + n - 1) % n; paintPicker(); break;
+    case 'Enter': case 'Space': picker.items[picker.idx].dispatchEvent(new MouseEvent('mousedown')); break;
+    case 'Escape': closePicker(); break;
+    case 'Delete': case 'Backspace': pickFx(null); break;
+    default: {
+      const L = e.key.toUpperCase();
+      if (FX[L] && FX[L].kinds.includes(trackKind(picker.t))) pickFx(L);
+      else return;
+    }
+  }
+  e.preventDefault();
 }
 
 // --------------------------------------------------------------- editing ---
 function setCell(r, t, cell, preview = true) {
   state.song.setCell(state.pattern, t, r, cell);
   paintCell(r, t);
-  send(msg.setCell(state.pattern, t, r, state.song.getCell(state.pattern, t, r)));
+  if (!fwLacks(t)) send(msg.setCell(state.pattern, t, r, state.song.getCell(state.pattern, t, r), state.proto));
   changed();
-  if (preview && cell.note && cell.note !== NOTE_OFF) send(msg.preview(t, cell.note, cell.vel || 100));
+  showStatusLine();
+  if (trackKind(t) === 'in' && cell.note && cell.note !== NOTE_OFF) ensureInTrackSource(t - K.firstIn);
+  if (preview && cell.note && cell.note !== NOTE_OFF && !fwLacks(t)) send(msg.preview(t, cell.note, cell.vel || 100));
+}
+
+// Typing a trigger on an IN track: make that track open the VCA.
+function ensureInTrackSource(i) {
+  const s = state.song;
+  if (s.vcaSource(i) === VCA_SRC.inTrack) return;
+  const was = VCA_SRC_NAMES[s.vcaSource(i)];
+  setMixParam(4 + i, 6, VCA_SRC.inTrack);
+  if (!s.mix(4 + i, 4)) setMixParam(4 + i, 4, 40);
+  toast(`IN${i + 1} VCA now follows the IN${i + 1} track (was: ${was}). Change it in the CV / IN tab.`, 4500);
+  buildCvIn(); buildMixer(); refreshTrackHeads();
+}
+function setMixParam(ch, p, x) { state.song.setMix(ch, p, x); send(msg.setMix(ch, p, x)); changed(); }
+function refreshTrackHeads() {
+  document.querySelectorAll('#grid .head .tname').forEach((n, t) => { n.lastChild.textContent = trackTitle(t); n.title = trackLongName(t); });
+  paintSubLabels();
+  for (let r = 0; r < rowEls.length; r++) for (let t = K.firstCv; t < K.firstIn; t++) paintCell(r, t);
 }
 
 function moveCursor(dr, dt, ds) {
   const len = state.song.patLen(state.pattern);
-  state.hexHi = null;
+  state.digit = null;
   if (dr) state.row = ((state.row + dr) % len + len) % len;
   if (dt) { state.track = clamp(state.track + dt, 0, K.tracks - 1); }
   if (ds) {
@@ -170,13 +365,36 @@ const NOTE_KEYS = {
   KeyI: 24, Digit9: 25, KeyO: 26, Digit0: 27, KeyP: 28,
 };
 
+// Shown value of the field under the cursor, and how to store a new one.
+function fieldValue(c, sub) {
+  if (sub === 1) return { show: Math.max(0, velShow(c.vel)), store: (d) => ({ ...c, vel: velStore(d) }) };
+  const code = c.fx;
+  return { code, show: fxShow(code, c.fxv), store: (d) => ({ ...c, fxv: fxStore(code, d) }) };
+}
+
 function onGridKey(e) {
+  if (picker.el) { onPickerKey(e); return; }
   if (e.target.closest('input,select,textarea') && e.target !== $('grid')) return;
   const k = e.code;
   const ctrl = e.ctrlKey || e.metaKey;
   if (ctrl && k === 'KeyC') { copyTrack(); e.preventDefault(); return; }
   if (ctrl && k === 'KeyV') { pasteTrack(); e.preventDefault(); return; }
   if (ctrl) return;
+  const c = state.song.getCell(state.pattern, state.track, state.row);
+  // Shift + arrows / PgUp / PgDn: change the value under the cursor.
+  if (e.shiftKey && state.edit && ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown'].includes(k)) {
+    const d = (k === 'ArrowUp' ? 1 : k === 'ArrowDown' ? -1 : k === 'PageUp' ? 10 : -10);
+    e.preventDefault();
+    if (state.sub === 0) {
+      if (c.note && c.note !== NOTE_OFF) setCell(state.row, state.track, { ...c, note: clamp(c.note + (Math.abs(d) === 10 ? Math.sign(d) * 12 : d), 1, 126) });
+      return;
+    }
+    if (state.sub === 2) return;
+    const fv = fieldValue(c, state.sub);
+    if (state.sub !== 1 && !fv.code) return;
+    setCell(state.row, state.track, fv.store(clamp(fv.show + d, 0, 99)), false);
+    return;
+  }
   switch (k) {
     case 'ArrowUp': moveCursor(-1, 0, 0); e.preventDefault(); return;
     case 'ArrowDown': moveCursor(1, 0, 0); e.preventDefault(); return;
@@ -188,12 +406,15 @@ function onGridKey(e) {
     case 'End': state.row = state.song.patLen(state.pattern) - 1; moveCursor(0, 0, 0); e.preventDefault(); return;
     case 'Tab': state.sub = 0; moveCursor(0, e.shiftKey ? -1 : 1, 0); e.preventDefault(); return;
     case 'Space': togglePlayPattern(); e.preventDefault(); return;
-    case 'Enter': send(msg.playSong(0)); e.preventDefault(); return;
-    case 'Minus': setOctave(state.octave - 1); e.preventDefault(); return;
-    case 'Equal': setOctave(state.octave + 1); e.preventDefault(); return;
+    case 'Enter':
+      if (state.sub >= 2 && state.edit) { openPicker(state.row, state.track, lastCursor); }
+      else send(msg.playSong(0));
+      e.preventDefault();
+      return;
+    case 'Minus': if (state.sub === 0) { setOctave(state.octave - 1); e.preventDefault(); } return;
+    case 'Equal': if (state.sub === 0) { setOctave(state.octave + 1); e.preventDefault(); } return;
     default: break;
   }
-  const c = state.song.getCell(state.pattern, state.track, state.row);
   if (k === 'Delete' || k === 'Backspace') {
     if (state.sub === 0) setCell(state.row, state.track, { note: 0, vel: 0, fx: 0, fxv: 0 }, false);
     else if (state.sub === 1) setCell(state.row, state.track, { ...c, vel: 0 }, false);
@@ -209,7 +430,7 @@ function onGridKey(e) {
     if (note == null) return;
     e.preventDefault();
     if (e.repeat) return;
-    if (!state.edit) { if (note !== NOTE_OFF) send(msg.preview(state.track, note, 100)); return; }
+    if (!state.edit) { if (note !== NOTE_OFF && !fwLacks(state.track)) send(msg.preview(state.track, note, 100)); return; }
     setCell(state.row, state.track, { ...c, note });
     moveCursor(state.step, 0, 0);
     return;
@@ -218,40 +439,43 @@ function onGridKey(e) {
   if (state.sub === 2) {
     const L = e.key.toUpperCase();
     if (L.length === 1 && FX[L]) {
-      const isCv = state.track >= K.drumTracks;
-      if (!(isCv ? FX[L].cv : FX[L].drum)) { toast(`Effect ${L} does not apply to ${isCv ? 'CV' : 'drum'} tracks`); return; }
-      setCell(state.row, state.track, { ...c, fx: FX[L].code, fxv: c.fxv || defaultFxValue(L) }, false);
-      moveCursor(0, 0, 1);
       e.preventDefault();
+      if (!FX[L].kinds.includes(trackKind(state.track))) { toast(`${L} (${FX[L].name}) does not apply to this track. Enter shows the effects that do.`); return; }
+      setFx(state.row, state.track, L);
     }
     return;
   }
-  // Hex digits in velocity / fx value.
-  const h = /^[0-9a-fA-F]$/.test(e.key) ? parseInt(e.key, 16) : null;
-  if (h == null) return;
+  // Decimal digits in the velocity and effect value columns: one digit sets
+  // the value, a second one makes it two digits (e.g. 7, then 5 = 75).
+  if (!/^[0-9]$/.test(e.key)) return;
   e.preventDefault();
-  if (state.hexHi == null) {
-    if (h > 7) { toast('Values go up to 7F (127)'); return; }
-    state.hexHi = h;
-    const v = h << 4;
-    setCell(state.row, state.track, state.sub === 1 ? { ...c, vel: v } : { ...c, fxv: v }, false);
+  const d = +e.key;
+  const fv = fieldValue(c, state.sub);
+  if (state.sub !== 1 && !fv.code) { toast('Choose the effect first: Enter or click the FX letter.'); return; }
+  const f = FX_BY_CODE[fv.code];
+  if (state.digit == null) {
+    setCell(state.row, state.track, fv.store(d), false);
+    // A second digit could not give a valid value (e.g. ratchet 2-8): done.
+    if (state.sub !== 1 && f && f.val === 'raw' && d * 10 > f.max) moveCursor(state.step, 0, 0);
+    else state.digit = d;
   } else {
-    const v = (state.hexHi << 4) | h;
-    state.hexHi = null;
-    setCell(state.row, state.track, state.sub === 1 ? { ...c, vel: v } : { ...c, fxv: v }, false);
+    const v = state.digit * 10 + d;
+    state.digit = null;
+    setCell(state.row, state.track, fv.store(v), false);
     moveCursor(state.step, 0, 0);
   }
 }
 
+// Stored units (see FX in protocol.js).
 function defaultFxValue(L) {
-  return { R: 2, P: 50, G: 8, S: 20, K: 8 }[L] ?? 64;
+  return { R: 2, P: 50, G: 8, S: 25, K: 8 }[L] ?? 64;
 }
 
 function copyTrack() {
   const arr = [];
   for (let r = 0; r < K.rows; r++) arr.push(state.song.getCell(state.pattern, state.track, r));
   state.clipTrack = arr;
-  toast(`Copied ${TRACK_NAMES[state.track]} of pattern ${hex2(state.pattern)}`, 1500);
+  toast(`Copied ${TRACK_NAMES[state.track]} of pattern ${pad2(state.pattern + 1)}`, 1500);
 }
 function pasteTrack() {
   if (!state.clipTrack) return;
@@ -261,7 +485,8 @@ function pasteTrack() {
   changed();
 }
 function sendTrack(p, t) {
-  for (let r = 0; r < K.rows; r += K.chunkRows) send(msg.setCells(state.song, p, t, r, K.chunkRows));
+  if (fwLacks(t)) return;
+  for (let r = 0; r < K.rows; r += K.chunkRows) send(msg.setCells(state.song, p, t, r, K.chunkRows, state.proto));
 }
 
 // ------------------------------------------------------------- transport ---
@@ -283,7 +508,7 @@ function buildArrangement() {
     row.dataset.i = i;
     row.appendChild(el('span', 'idx', String(i + 1).padStart(2, '0')));
     const sel = el('select');
-    for (let p = 0; p < K.patterns; p++) { const o = el('option', null, 'P' + hex2(p)); o.value = p; sel.appendChild(o); }
+    for (let p = 0; p < K.patterns; p++) { const o = el('option', null, 'P' + pad2(p + 1)); o.value = p; sel.appendChild(o); }
     sel.value = e.pattern;
     sel.onchange = () => { state.song.setEntry(i, +sel.value, state.song.entry(i).repeats); send(msg.setEntry(i, +sel.value, state.song.entry(i).repeats)); changed(); };
     const rep = el('input'); rep.type = 'number'; rep.min = 1; rep.max = 16; rep.value = e.repeats; rep.title = 'repeats';
@@ -320,11 +545,13 @@ const fmtA = (eng) => (v) => (eng === 4 ? MATERIALS[v >> 4].slice(0, 8) : eng ==
 const fmtMacro = (v) => (v > 0 ? '+' : '') + v;
 
 // knobs.drum[v][param], knobs.cv[t][param], knobs.mix[ch][param], knobs.master[param]
-const knobs = { drum: [], cv: [], mix: [], master: [] };
+const knobs = { drum: [], cv: [], inm: [], mix: [], master: [] };
 let voicePanels = [];
 let voiceLeds = [];
 let gateLeds = [];
 let routeBtns = []; // routeBtns[v][macro]
+let routeBtnsCv = []; // [0/1 CV, 2/3 IN][macro]
+let inLeds = [];
 let lastMaskEdit = 0;
 
 function moduleEl(title, cls = '') {
@@ -398,50 +625,124 @@ function buildVoices() {
     box.appendChild(m);
     voicePanels.push(m);
   }
-  paintRoutes();
-  buildCv();
-  paintMods();
+  buildCvIn();
 }
 
 function paintRoutes() {
   const s = state.song;
-  routeBtns.forEach((row, v) => row.forEach((b, mi) => {
-    const on = s.macroOn(mi, v);
+  const paint = (b, on, dis) => {
     b.classList.toggle('on', on);
     b.querySelector('.led').classList.toggle('lit', on);
-    b.disabled = !!state.legacy;
+    b.disabled = dis;
     b.setAttribute('aria-pressed', String(on));
+  };
+  routeBtns.forEach((row, v) => row.forEach((b, mi) => paint(b, s.macroOn(mi, v), !!state.legacy)));
+  const old = dev.connected && state.proto < 3;
+  routeBtnsCv.forEach((row, j) => row.forEach((b, mi) => {
+    paint(b, !!(s.macroCvMask(mi) & (1 << j)), old);
+    if (old) b.title = 'Needs firmware 0.3';
   }));
 }
 
-function buildCv() {
+// MAIN / X routing buttons for a CV (j = 0/1) or IN (j = 2/3) module.
+function cvinRoutes(j, whatMain, whatX) {
+  const s = state.song;
+  const routes = el('div', 'routes');
+  routeBtnsCv[j] = [];
+  [['MAIN', `Main knob → ${whatMain}`], ['X', `X knob → ${whatX}`]].forEach(([name, what], mi) => {
+    const b = el('button');
+    b.append(el('i', 'led'), document.createTextNode(name));
+    b.title = `${what} in PERFORM mode. Click to toggle. Stored in the song.`;
+    b.onclick = () => {
+      const bits = s.macroCvMask(mi) ^ (1 << j);
+      s.setMacroCvMask(mi, bits);
+      lastMaskEdit = performance.now();
+      if (!dev.connected || state.proto >= 3) send(msg.setMacroMask(mi, s.macroMask(mi), bits));
+      changed(); paintRoutes(); paintMods();
+    };
+    routes.appendChild(b);
+    routeBtnsCv[j][mi] = b;
+  });
+  return routes;
+}
+
+const fmtGate = (v) => (v === 0 ? 'tie' : `${(v / 16).toFixed(2)}row`);
+const fmtHold = (v) => (v === 0 ? 'to OFF' : `${(v / 16).toFixed(2)}row`);
+function buildCvIn() {
   const box = $('cvpanel');
   box.innerHTML = '';
-  gateLeds = []; knobs.cv = [];
+  gateLeds = []; inLeds = []; knobs.cv = []; knobs.inm = []; routeBtnsCv = [];
+  voicePanels.length = K.drumTracks;
   const s = state.song;
   for (let c = 0; c < K.cvTracks; c++) {
-    const m = moduleEl(`CV/GATE ${c + 1}`, 'voice-cv');
+    const m = moduleEl(`CV/GATE ${c + 1}`, 'voice-cv narrow');
     gateLeds.push(m.led);
-    const set = (param) => (x) => { s.setCv(c, param, x); send(msg.setCv(c, param, x)); changed(); };
-    const kg = new Knob({ label: 'Gate', min: 0, max: 64, value: s.cv(c, 0), def: 8, size: 'l', fmt: (v) => (v === 0 ? 'tie' : `${(v / 16).toFixed(2)}row`), onChange: set(0) });
-    const kgl = new Knob({ label: 'Glide', value: s.cv(c, 1), def: 0, fmt: (v) => (v === 0 ? 'off' : `${Math.round((48 + v * v * 6) / 48)}ms`), onChange: set(1) });
-    const ktr = new Knob({ label: 'Transp', min: 16, max: 112, value: s.cv(c, 2), def: 64, fmt: fmtSigned, bipolar: true, onChange: set(2) });
+    const set = (param) => (x) => { s.setCv(c, param, x); send(msg.setCv(c, param, x)); changed(); paintMods(); };
+    const kg = new Knob({ label: 'Gate', min: 0, max: 64, value: s.cv(c, 0), def: 8, size: 'l', fmt: fmtGate, onChange: set(0),
+      title: 'Gate length (1/16 row). Main knob adds to it when MAIN is lit (red arc = live).' });
+    const kgl = new Knob({ label: 'Glide', value: s.cv(c, 1), def: 0, size: 's', fmt: (v) => (v === 0 ? 'off' : `${Math.round((48 + v * v * 6) / 48)}ms`), onChange: set(1),
+      title: 'Portamento. X knob adds to it when X is lit.' });
+    const ktr = new Knob({ label: 'Transp', min: 16, max: 112, value: s.cv(c, 2), def: 64, size: 's', fmt: fmtSigned, bipolar: true, onChange: set(2) });
     knobs.cv[c] = [kg, kgl, ktr];
     const test = el('button', 'audition', 'TEST');
     test.title = 'Play a test note on this CV/gate output';
-    test.onclick = () => send(msg.preview(K.drumTracks + c, 48, 100));
-    m.append(el('div', 'msub', `CV out ${c + 1} = pitch · pulse out ${c + 1} = gate`), kg.el, krow(kgl, ktr), el('div', 'spacer'), test, jacks(['CV', 'GATE']));
+    test.onclick = () => send(msg.preview(K.firstCv + c, 48, 100));
+    m.append(el('div', 'msub', `CV ${c + 1} = pitch · pulse ${c + 1} = gate`), cvinRoutes(c, 'gate length', 'glide'), kg.el, krow(kgl, ktr), el('div', 'spacer'), test, jacks(['CV', 'GATE']));
     box.appendChild(m);
-    voicePanels.push(m);
+    voicePanels[K.firstCv + c] = m;
   }
-  const g = moduleEl('CV RANGE', 'voice-cv');
+  const g = moduleEl('CV RANGE', 'voice-cv narrow');
   const kz = new Knob({ label: '0 V note', min: 0, max: 96, value: s.cvZero, def: 36, size: 'l', fmt: (v) => noteName(v), onChange: (x) => { s.cvZero = x; send(msg.setZeroNote(x)); changed(); } });
   knobs.cvZero = kz;
   g.append(el('div', 'msub', '1 V/oct, 0…+6 V'), kz.el, el('div', 'msub', 'This note = 0 V. Lower notes stay at 0 V.'), el('div', 'spacer'), jacks(['CV1', 'CV2']));
   box.appendChild(g);
+  for (let i = 0; i < K.inTracks; i++) {
+    const ch = 4 + i;
+    const m = moduleEl(`IN ${i + 1} VCA`, 'voice-in narrow');
+    inLeds.push(m.led);
+    const old = dev.connected && state.proto < 3;
+    const set = (param) => (x) => { setMixParam(ch, param, x); paintMods(); syncInKnobs(); };
+    const src = el('select', 'engine');
+    src.title = `What opens the VCA of audio in ${i + 1}. CV GATE: the CV/gate ${i + 1} track, its velocity sets the level. IN TRACK: the IN${i + 1} track (TRIG + LVL).`;
+    const opts = [[VCA_SRC.open, 'OPEN (always on)'], [VCA_SRC.cvGate, `CV GATE ${i + 1}`], [VCA_SRC.inTrack, `IN${i + 1} TRACK`]];
+    if (s.mix(ch, 6) === VCA_SRC.auto) opts.unshift([VCA_SRC.auto, s.mix(ch, 4) ? `AUTO (= CV GATE ${i + 1})` : 'AUTO (= OPEN)']);
+    for (const [v, n] of opts) { const o = el('option', null, n); o.value = v; src.appendChild(o); }
+    src.value = s.mix(ch, 6);
+    src.disabled = old;
+    src.onchange = () => {
+      setMixParam(ch, 6, +src.value);
+      if (+src.value >= VCA_SRC.cvGate && !s.mix(ch, 4)) setMixParam(ch, 4, 40);
+      buildCvIn(); buildMixer(); refreshTrackHeads();
+    };
+    const kd = new Knob({ label: 'Decay', value: s.mix(ch, 4), def: 40, size: 'l', fmt: fmtDecay, onChange: set(4),
+      title: 'VCA release after the gate. Main knob adds to it when MAIN is lit (red arc = live).' });
+    const kh = new Knob({ label: 'Hold', min: 0, max: 64, value: s.mix(ch, 7), def: 8, size: 's', fmt: fmtHold, onChange: set(7),
+      title: 'IN TRACK: how long a TRIG keeps the VCA open (1/16 row; FX G overrides per step).' });
+    const kdr = new Knob({ label: 'Drive', value: s.mix(ch, 2), def: 0, size: 's', onChange: set(2),
+      title: 'Saturation of this input. X knob adds to it when X is lit.' });
+    if (old) [kh].forEach((k) => k.setDisabled(true));
+    knobs.inm[i] = { decay: kd, hold: kh, drive: kdr };
+    const test = el('button', 'audition', 'TEST');
+    test.title = `Open the IN${i + 1} VCA once (IN TRACK mode)`;
+    test.disabled = old;
+    test.onclick = () => send(msg.preview(K.firstIn + i, 60, 127));
+    m.append(src, cvinRoutes(2 + i, 'VCA decay', 'drive'), kd.el, krow(kh, kdr), el('div', 'spacer'), test, jacks(['IN', '→MIX']));
+    box.appendChild(m);
+    voicePanels[K.firstIn + i] = m;
+  }
+  paintRoutes();
+  paintMods();
+}
+// The mixer strip shows the same IN drive / decay values.
+function syncInKnobs() {
+  for (let i = 0; i < K.inTracks; i++) {
+    const kk = knobs.inm[i], mk = knobs.mix[4 + i];
+    if (kk) { kk.decay.set(state.song.mix(4 + i, 4)); kk.drive.set(state.song.mix(4 + i, 2)); kk.hold.set(state.song.mix(4 + i, 7)); }
+    if (mk) { mk[2].set(state.song.mix(4 + i, 2)); if (mk[4]) mk[4].set(state.song.mix(4 + i, 4)); }
+  }
 }
 
-function selectVoicePanel(t) { voicePanels.forEach((p, i) => p.classList.toggle('sel', i === t)); }
+function selectVoicePanel(t) { voicePanels.forEach((p, i) => p && p.classList.toggle('sel', i === t)); }
 
 // ----------------------------------------------------------------- mixer ---
 let meters = [];
@@ -465,11 +766,13 @@ function buildMixer() {
     knobs.mix[ch] = k;
     m.append(met, ...k.map((x) => x.el));
     if (isIn) {
-      const vca = new Knob({ label: 'Gate VCA', value: s.mix(ch, 4), def: 0, size: 's', fmt: (v) => (v ? fmtDecay(v) : 'off'), onChange: set(4),
-        title: `Audio in ${ch - K.drumTracks + 1}: opens with CV/gate track ${ch - K.drumTracks + 1}; value = release time (off = always open)` });
+      const i = ch - K.drumTracks;
+      const vca = new Knob({ label: 'VCA dec', value: s.mix(ch, 4), def: 40, size: 's', fmt: fmtDecay, onChange: (x) => { set(4)(x); syncInKnobs(); paintMods(); },
+        title: `Audio in ${i + 1} VCA release (also on the CV / IN tab). Source: ${VCA_SRC_NAMES[state.song.vcaSource(i)]}` });
+      k[2].onChange = (x) => { set(2)(x); syncInKnobs(); paintMods(); };
       k.push(vca);
       m.appendChild(vca.el);
-      m.title = `IN${ch - K.drumTracks + 1} = audio input ${ch - K.drumTracks + 1} (e.g. a VCO)`;
+      m.title = `IN${i + 1} = audio input ${i + 1} (e.g. a VCO). Its VCA is set up on the CV / IN tab.`;
     }
     const mute = el('button', 'mute');
     mute.append(el('i', 'led'), document.createTextNode('MUTE'));
@@ -516,6 +819,22 @@ function paintMods() {
     kk[2].setMod(p ? p.effA[v] : effectiveDrum(s, mac, v, 2));
   }
   if (knobs.master[2]) knobs.master[2].setMod(p ? p.effFilter : effectiveFilter(s, mac));
+  // CV / IN macros (firmware 0.3). Older firmware: no arcs.
+  const old = dev.connected && state.proto < 3;
+  const pv = p && p.v3 ? p : null;
+  for (let c = 0; c < K.cvTracks; c++) {
+    const kk = knobs.cv[c];
+    if (!kk) continue;
+    kk[0].setMod(old ? null : pv ? pv.effCvGate[c] : effectiveCv(state.song, mac, c, 0));
+    kk[1].setMod(old ? null : pv ? pv.effCvGlide[c] : effectiveCv(state.song, mac, c, 1));
+  }
+  for (let i = 0; i < K.inTracks; i++) {
+    const dec = old ? null : pv ? pv.effInDecay[i] : effectiveIn(state.song, mac, i, 4);
+    const drv = old ? null : pv ? pv.effInDrive[i] : effectiveIn(state.song, mac, i, 2);
+    const kk = knobs.inm[i], mk = knobs.mix[4 + i];
+    if (kk) { kk.decay.setMod(dec); kk.drive.setMod(drv); }
+    if (mk) { mk[2].setMod(drv); if (mk[4]) mk[4].setMod(dec); }
+  }
 }
 
 // ------------------------------------------------- module panel (live) ----
@@ -625,9 +944,18 @@ function onMessage(data) {
       $('fwInfo').textContent = `fw ${m.firmware}`;
       fillSlots(m.validSlots, m.slot);
       state.legacy = m.protocol < 2;
-      if (m.protocol < PROTOCOL_VERSION) {
-        banner(`The module runs firmware ${m.firmware} (protocol ${m.protocol}). Editing and playback work, but knob feedback and ` +
-          `MAIN/X voice routing need firmware 0.2 or newer: flash the new workshop_tracker.uf2.`);
+      if (state.proto !== Math.min(m.protocol, PROTOCOL_VERSION)) {
+        state.proto = Math.min(m.protocol, PROTOCOL_VERSION);
+        buildCvIn(); buildMixer(); buildGrid();
+      }
+      state.dump.tracksExpected = state.proto < 3 ? K.v2Tracks : K.tracks;
+      if (m.protocol === 3) {
+        banner(`The module runs firmware ${m.firmware}, which still has a second effect column. Everything works from here (the second ` +
+          `effect is cleared when you edit a step), but please flash the new workshop_tracker.uf2 (0.3.1). Its songs and slots are converted.`);
+      } else if (m.protocol < 3) {
+        banner(`The module runs firmware ${m.firmware} (protocol ${m.protocol}). Drums and CV/gate tracks play, but the IN tracks ` +
+          `and the CV/IN macro routing need firmware 0.3.1` + (m.protocol < 2 ? ', knob feedback and MAIN/X voice routing 0.2' : '') +
+          `: flash the new workshop_tracker.uf2. Songs from the module are converted on reading.`);
       } else if (m.protocol > PROTOCOL_VERSION) {
         banner(`The module speaks protocol ${m.protocol}, this editor ${PROTOCOL_VERSION}. Reload the page or update the editor; some features may not work.`);
       } else hideBanner();
@@ -668,7 +996,7 @@ function onStatus(st) {
   cpu.className = st.cpuPeak > 90 ? 'hot' : st.cpuPeak > 75 ? 'warn' : '';
   let txt = MODES[st.mode] || '?';
   if (st.mode === 1) txt += ` · PART ${st.entry + 1}/${state.song.songLen}`;
-  if (st.mode) txt += ` · P${hex2(st.pattern)} · ROW ${hex2(st.row)}`;
+  if (st.mode) txt += ` · P${pad2(st.pattern + 1)} · ROW ${pad2(st.row + 1)}`;
   if (st.extClock) txt += ' · EXT CLK';
   if (st.nextQueued) txt += ' · NEXT…';
   $('modeOut').textContent = txt;
@@ -679,9 +1007,10 @@ function onStatus(st) {
   paintPlayhead();
   paintArrangementPos();
   st.peaks.forEach((p, i) => { if (meters[i]) meters[i].style.height = `${Math.min(100, (p / 127) * 100)}%`; });
-  headHits.forEach((d, i) => d.classList.toggle('lit', i < 4 ? !!(st.hits & (1 << i)) : st.gates[i - 4]));
+  headHits.forEach((d, i) => d.classList.toggle('lit', i < K.firstCv ? !!(st.hits & (1 << i)) : i < K.firstIn ? st.gates[i - K.firstCv] : st.inGates[i - K.firstIn]));
   for (let v = 0; v < 4; v++) if (st.hits & (1 << v)) flashLed(voiceLeds[v]);
   gateLeds.forEach((l, i) => l.classList.toggle('lit', st.gates[i]));
+  inLeds.forEach((l, i) => l.classList.toggle('lit', st.inGates[i]));
   $('btnPlaySong').classList.toggle('on', st.mode === 1);
   $('btnPlayPat').classList.toggle('on', st.mode === 2);
   if (state.info && st.slot !== state.info.slot) { state.info.slot = st.slot; $('slot').value = st.slot; }
@@ -701,6 +1030,9 @@ function onPanel(p) {
   // Routing edits from another editor (or a song loaded on the module).
   if (performance.now() - lastMaskEdit > 800 && (p.masks[0] !== state.song.macroMask(0) || p.masks[1] !== state.song.macroMask(1))) {
     state.song.setMacroMask(0, p.masks[0]); state.song.setMacroMask(1, p.masks[1]); changed(); paintRoutes();
+  }
+  if (p.v3 && performance.now() - lastMaskEdit > 800 && (p.cvinMasks[0] !== state.song.macroCvMask(0) || p.cvinMasks[1] !== state.song.macroCvMask(1))) {
+    state.song.setMacroCvMask(0, p.cvinMasks[0]); state.song.setMacroCvMask(1, p.cvinMasks[1]); changed(); paintRoutes();
   }
   syncTempoSwing(p.tempo, p.swing);
   paintMods();
@@ -756,6 +1088,7 @@ function setConn(kind, text) {
 function pull() {
   if (!dev.connected) return;
   state.dump.reset();
+  state.dump.tracksExpected = state.proto < 3 ? K.v2Tracks : K.tracks;
   state.dumping = true;
   setConn('busy', 'reading…');
   send(msg.getSong());
@@ -763,7 +1096,7 @@ function pull() {
 
 async function push() {
   if (!dev.connected) { toast('Not connected'); return; }
-  const all = uploadMessages(state.song);
+  const all = uploadMessages(state.song, state.proto);
   setConn('busy', 'sending…');
   for (let i = 0; i < all.length; i++) {
     dev.send(all[i]);
@@ -780,6 +1113,7 @@ async function connect() {
     state.status = null;
     state.panel = null;
     state.legacy = false;
+    resetProto();
     paintMods(); paintComputer(); paintRoutes();
     setConn('off', 'offline');
     $('fwInfo').textContent = '';
@@ -822,6 +1156,7 @@ dev.onState = (reason) => {
     state.status = null;
     state.panel = null;
     state.legacy = false;
+    resetProto();
     paintMods(); paintComputer(); paintRoutes();
     setConn('off', 'offline');
     if (reason) toast(reason + '. The module keeps playing on its own (performance mode).', 5000);
@@ -829,6 +1164,12 @@ dev.onState = (reason) => {
 };
 
 // ---------------------------------------------------------------- wiring ---
+function resetProto() {
+  const was = state.proto;
+  state.proto = PROTOCOL_VERSION;
+  if (was !== PROTOCOL_VERSION) { hideBanner(); buildCvIn(); buildMixer(); buildGrid(); }
+}
+
 function selectTab(name) {
   document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   for (const n of ['voices', 'mixer', 'cv']) $('pane-' + n).hidden = n !== name;
@@ -840,7 +1181,7 @@ function wire() {
   selectTab((() => { try { return localStorage.getItem('workshopTracker.tab') || 'voices'; } catch { return 'voices'; } })());
   for (let o = 0; o <= 8; o++) { const x = el('option', null, String(o)); x.value = o; $('octave').appendChild(x); }
   for (let s = 0; s <= 8; s++) { const x = el('option', null, String(s)); x.value = s; $('step').appendChild(x); }
-  for (let p = 0; p < K.patterns; p++) { const x = el('option', null, 'Pattern ' + hex2(p)); x.value = p; $('pattern').appendChild(x); }
+  for (let p = 0; p < K.patterns; p++) { const x = el('option', null, 'Pattern ' + pad2(p + 1)); x.value = p; $('pattern').appendChild(x); }
   fillSlots(0, 0);
   $('octave').value = state.octave; $('step').value = state.step;
   $('octave').onchange = () => setOctave(+$('octave').value);
@@ -914,7 +1255,7 @@ function wire() {
   $('btnCopyPat').onclick = () => {
     state.clipPattern = { len: state.song.patLen(state.pattern), tracks: [] };
     for (let t = 0; t < K.tracks; t++) { const a = []; for (let r = 0; r < K.rows; r++) a.push(state.song.getCell(state.pattern, t, r)); state.clipPattern.tracks.push(a); }
-    toast(`Copied pattern ${hex2(state.pattern)}`, 1500);
+    toast(`Copied pattern ${pad2(state.pattern + 1)}`, 1500);
   };
   $('btnPastePat').onclick = () => {
     const c = state.clipPattern;
@@ -924,7 +1265,7 @@ function wire() {
     $('patLen').value = c.len; changed(); buildGrid();
   };
   $('btnClearPat').onclick = () => {
-    if (!confirm(`Clear pattern ${hex2(state.pattern)}?`)) return;
+    if (!confirm(`Clear pattern ${pad2(state.pattern + 1)}?`)) return;
     for (let t = 0; t < K.tracks; t++) { for (let r = 0; r < K.rows; r++) state.song.setCell(state.pattern, t, r, { note: 0, vel: 0, fx: 0, fxv: 0 }); sendTrack(state.pattern, t); }
     changed(); buildGrid();
   };
@@ -934,10 +1275,18 @@ function wire() {
   grid.addEventListener('mousedown', (e) => {
     const f = e.target.closest('span.f');
     if (!f) return;
-    state.row = +f.dataset.r; state.track = +f.dataset.t; state.sub = +f.dataset.s; state.hexHi = null;
+    state.row = +f.dataset.r; state.track = +f.dataset.t; state.sub = +f.dataset.s; state.digit = null;
     paintCursor(false);
+    if (state.edit && state.sub >= 2) openPicker(state.row, state.track, f);
     setTimeout(() => grid.focus(), 0);
   });
+  grid.addEventListener('mouseover', (e) => {
+    const f = e.target.closest('span.f');
+    if (f !== hoverField) { hoverField = f; showStatusLine(); }
+  });
+  grid.addEventListener('mouseleave', () => { hoverField = null; showStatusLine(); });
+  document.addEventListener('mousedown', (e) => { if (picker.el && !picker.el.contains(e.target) && !e.target.closest('span.f')) closePicker(); });
+  window.addEventListener('resize', () => { closePicker(); fitGrid(); });
   if (!Device.supported()) toast('WebMIDI is not available in this browser: you can edit offline, but connecting needs Chrome or Edge.', 7000);
 }
 

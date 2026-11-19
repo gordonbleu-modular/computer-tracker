@@ -6,6 +6,7 @@
 #include "engine/protocol.h"
 
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <vector>
@@ -395,10 +396,10 @@ static void test_protocol() {
     feed(sysex({proto::Load, 1}));
     CHECK(h.loaded == 1);
 
-    // Full dump: header + 16*6*4 chunks + end, all 7-bit, re-assembles to the same song.
+    // Full dump: header + 16*8*4 chunks + end, all 7-bit, re-assembles to the same song.
     h.sent.clear();
     feed(sysex({proto::GetSong}));
-    CHECK(h.sent.size() == 1 + 16 * 6 * 4 + 1);
+    CHECK(h.sent.size() == 1 + 16 * 8 * 4 + 1);
     auto copy = make_song(false);
     bool seven = true;
     for (auto& m : h.sent) {
@@ -407,7 +408,8 @@ static void test_protocol() {
             CHECK(m.size() == 1u + kSongHeaderBytes);
             std::memcpy(static_cast<SongHeader*>(copy.get()), m.data() + 1, kSongHeaderBytes);
         } else if (m[0] == proto::PatternChunk) {
-            std::memcpy(&copy->cells[m[1]][m[2]][m[3]], m.data() + 5, static_cast<size_t>(m[4]) * 4);
+            CHECK(m.size() == 5u + static_cast<size_t>(m[4]) * kCellBytes);
+            std::memcpy(&copy->cells[m[1]][m[2]][m[3]], m.data() + 5, static_cast<size_t>(m[4]) * kCellBytes);
         }
     }
     CHECK(seven);
@@ -458,12 +460,18 @@ static void test_store() {
     std::vector<uint8_t> erased(store::kSlotSize, 0xFF);
     CHECK(!store::slot_valid(erased.data()));
 
-    // Layout: 6 slots + system sector at the top of 2 MB, sector aligned.
+    // Layout: system sector at the top of 2 MB, the 6 old v2 slots below it
+    // (unchanged addresses), the 6 v3 slots below those; all sector aligned.
     const uint32_t fs = 2u * 1024 * 1024;
     CHECK(store::sys_offset(fs) == fs - 4096);
-    CHECK(store::slot_offset(fs, 5) + store::kSlotSize == store::sys_offset(fs));
+    CHECK(store::v2_slot_offset(fs, 5) + store::kV2SlotSize == store::sys_offset(fs));
+    CHECK(store::v2_slot_offset(fs, 0) == fs - 4096 - 6 * 28672);   // same as firmware 0.1/0.2
+    CHECK(store::slot_offset(fs, 5) + store::kSlotSize == store::v2_slot_offset(fs, 0));
     CHECK(store::slot_offset(fs, 0) % 4096 == 0);
-    CHECK(store::reserved_bytes() == 4096 + 6 * 28672);
+    CHECK(store::reserved_bytes() == 4096 + 6 * 28672 + 6 * 53248);
+    CHECK(store::kRecordPages * store::kPageSize <= store::kSlotSize);
+    CHECK(store::kSlotSectors == 9 && store::kRecordSize <= store::kSlotSectors * store::kSectorSize);
+    CHECK(sizeof(Song) == 32980);
 
     std::vector<uint8_t> sys(store::kSectorSize, 0xFF);
     CHECK(store::sys_last_slot(sys.data()) == -1);
@@ -581,7 +589,8 @@ static void test_macros_v2() {
     feed(sysex({proto::SetMacroMask, 0}));
     CHECK(pr.rejected() == rej + 3);
     feed(sysex({proto::Hello}));
-    CHECK(!h.sent.empty() && h.sent.back()[0] == proto::Info && h.sent.back()[1] == 2);
+    CHECK(!h.sent.empty() && h.sent.back()[0] == proto::Info && h.sent.back()[1] == 4 && h.sent.back()[3] == 3 &&
+          h.sent.back()[4] == 1 && h.sent.back()[5] == 8);
 
     // Panel report contents.
     EngineStatus st;
@@ -638,6 +647,432 @@ static void test_macros_v2() {
     CHECK(rep.poll(t + 10, q, *s, b) > 0);
 }
 
+// ------------------------------------------------------------------ v3 -----
+// Mirrors core 1's slot handling in main.cpp (load_into_spare_and_swap,
+// free_spare, the panel request loop) against the real engine.
+// (not inlined: GCC 14 reports a bogus stringop-overflow inside the queue otherwise)
+__attribute__((noinline)) static void push_cmd(TrackerEngine& e, const Command& c) { e.commands().push(c); }
+
+struct Core1Sim {
+    TrackerEngine& eng;
+    std::vector<std::unique_ptr<Song>> slots;   // nullptr = empty slot
+    EngineIn* in;
+    uint32_t swaps_requested = 0;
+    bool hung = false;
+    void run(int n) { EngineOut o; for (int i = 0; i < n; ++i) eng.process(*in, o); }
+    // wait_swap_idle(): core 1 spins (servicing USB) while core 0 plays.
+    void wait_idle(int max_samples) {
+        int n = 0;
+        while (eng.status().swap_count != swaps_requested || !eng.swap_idle()) {
+            run(1);
+            if (++n > max_samples) { hung = true; return; }
+        }
+    }
+    void free_spare() {
+        if (!eng.swap_idle()) push_cmd(eng, Command{CmdType::CancelSwap, 0, 0, 0});
+        wait_idle(kSampleRate * 2);
+    }
+    bool serve() {
+        const int s = eng.take_slot_request();
+        if (s < 0) return false;
+        free_spare();
+        if (hung) return true;
+        if (!slots[s]) {
+            push_cmd(eng, Command{CmdType::SetSlot, static_cast<uint8_t>(eng.status().slot), 0, 0});
+            return true;
+        }
+        *eng.spare() = *slots[s];
+        ++swaps_requested;
+        push_cmd(eng, Command{CmdType::SwapSong, 0, static_cast<uint8_t>(s + 1), 0});
+        return true;
+    }
+};
+
+static int zone_knob(int zone) { return zone * 4096 / 6 + 340; }   // middle of a slot zone
+
+static void test_slot_select_bug() {
+    // Two saved slots (1 and 2 = index 0 and 1), started from slot 2, playing.
+    auto a = make_song(false), b = make_song(false);
+    auto eng = std::make_unique<TrackerEngine>();
+    EngineIn in;
+    Core1Sim c1{*eng, {}, &in};
+    for (int i = 0; i < 6; ++i) c1.slots.emplace_back(nullptr);
+    c1.slots[0] = make_song(false); std::memcpy(c1.slots[0]->name, "SLOT ONE    ", 12);
+    c1.slots[1] = make_song(false); std::memcpy(c1.slots[1]->name, "SLOT TWO    ", 12);
+    *a = *c1.slots[1];
+    in.knobs[0] = zone_knob(1);
+    eng->init(a.get(), b.get(), 1, in);
+    eng->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+    c1.run(4800);
+    in.sw = Sw::Up;                      // SELECT page
+    c1.run(4800);
+    // Slot 2 -> slot 1 while playing: waits for the pattern end (16 rows = 96000 samples).
+    in.knobs[0] = zone_knob(0);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    c1.run(4800);
+    CHECK(eng->seq().swap_pending());
+    // The user stops the sequencer before the pattern ends (Stop from the app or panel).
+    eng->commands().push(Command{CmdType::Stop, 0, 0, 0});
+    c1.run(100);
+    // Firmware 0.2: the swap stayed pending forever once stopped and core 1
+    // hung in wait_swap_idle() on the next load, so 1 -> 2 never happened.
+    CHECK(eng->swap_idle());
+    CHECK(eng->status().slot == 0);
+    CHECK(std::memcmp(eng->live()->name, "SLOT ONE", 8) == 0);
+    // ... and back to slot 2.
+    in.knobs[0] = zone_knob(1);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    c1.run(100);
+    CHECK(!c1.hung);
+    CHECK(eng->status().slot == 1);
+    CHECK(std::memcmp(eng->live()->name, "SLOT TWO", 8) == 0);
+
+    // While playing: 2 -> 1 -> 2 round trip through pattern ends.
+    eng->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+    in.knobs[0] = zone_knob(0);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    c1.run(16 * 6000);
+    CHECK(eng->status().slot == 0 && std::memcmp(eng->live()->name, "SLOT ONE", 8) == 0);
+    in.knobs[0] = zone_knob(1);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    c1.run(16 * 6000);
+    CHECK(eng->status().slot == 1 && std::memcmp(eng->live()->name, "SLOT TWO", 8) == 0);
+
+    // A newer choice replaces one still waiting (no hang, last one wins).
+    in.knobs[0] = zone_knob(0);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    in.knobs[0] = zone_knob(1);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    CHECK(!c1.hung);
+    c1.run(16 * 6000);
+    CHECK(eng->status().slot == 1 && std::memcmp(eng->live()->name, "SLOT TWO", 8) == 0);
+
+    // External clock that stops (cable in, no pulses): the waiting swap no
+    // longer blocks the next choice.
+    in.clock_connected = true;
+    in.knobs[0] = zone_knob(0);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    c1.run(kSampleRate);
+    CHECK(eng->seq().swap_pending());
+    in.knobs[0] = zone_knob(1);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    CHECK(!c1.hung);
+    in.clock_connected = false;
+
+    // Empty slot: nothing loads and the panel goes back to the playing slot,
+    // so turning back to it is a change again.
+    eng->commands().push(Command{CmdType::Stop, 0, 0, 0});
+    c1.run(100);
+    const uint32_t playing = eng->status().slot;
+    in.knobs[0] = zone_knob(4);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    c1.run(100);
+    CHECK(eng->status().slot == playing && eng->panel().slot() == static_cast<int>(playing));
+    in.knobs[0] = zone_knob(0);
+    c1.run(kSampleRate / 2);
+    CHECK(c1.serve());
+    c1.run(100);
+    CHECK(eng->status().slot == 0);
+}
+
+static void test_fx() {
+    auto s = make_song(false);
+    set_cell(*s, 0, 0, 0, 36, 0, FxRatchet, 4);   // 4 hits
+    set_cell(*s, 0, 1, 0, 50, 0, FxProb, 0);      // never
+    set_cell(*s, 0, 2, 0, 60, 0, FxParamA, 10);   // lock
+    set_cell(*s, 0, 3, 0, 48, 0, FxDelay, 8);     // half a row late
+    Cell c{1, 0, FxGate, 5};
+    CHECK(fx_get(c, FxGate) == 5);
+    CHECK(fx_get(c, FxSlide) == -1);
+    CHECK(sizeof(Cell) == 4);
+    Sequencer q;
+    q.attach(s.get());
+    q.play_pattern(0);
+    ClockIn ck;
+    int hits[kDrumTracks] = {};
+    int first3 = -1;
+    DrumEvent lock{};
+    for (int i = 0; i < 9500; ++i) {
+        q.tick(ck);
+        DrumEvent e;
+        while (q.pop_drum(e)) {
+            ++hits[e.track];
+            if (e.track == 2) lock = e;
+            if (e.track == 3 && first3 < 0) first3 = i;
+        }
+    }
+    CHECK(hits[0] == 4);
+    CHECK(hits[1] == 0);
+    CHECK(hits[2] == 1 && lock.a == 10 && lock.decay == kNoLock && lock.b == kNoLock);
+    CHECK(hits[3] == 1 && std::abs(first3 - (6 + 3000)) <= 2);
+}
+
+static void test_in_tracks() {
+    // IN1 driven by its own track: gate length, velocity = level, OFF, D lock.
+    auto s = make_song(false);
+    s->set_tempo(120);
+    s->mix[4][MpVcaSrc] = VcaInTrack;
+    s->mix[4][MpVca] = 20;
+    s->mix[4][MpInGate] = 4;                                  // quarter row
+    set_cell(*s, 0, kFirstInTrack, 0, 60, 64);
+    set_cell(*s, 0, kFirstInTrack, 1, 60, 0, FxDecay, 90);   // decay lock
+    set_cell(*s, 0, kFirstInTrack, 2, 60, 0, FxGate, 0);     // tie
+    set_cell(*s, 0, kFirstInTrack, 3, kNoteOff);
+    Sequencer q;
+    q.attach(s.get());
+    q.play_pattern(0);
+    ClockIn ck;
+    for (int i = 0; i < 20; ++i) q.tick(ck);
+    CHECK(q.in_gate(0) && q.in_vel(0) == 64 && q.in_decay_lock(0) == kNoLock);
+    for (int i = 20; i < 1600; ++i) q.tick(ck);
+    CHECK(!q.in_gate(0));                                     // fell at ~1500
+    for (int i = 1600; i < 6000 + 300; ++i) q.tick(ck);
+    CHECK(q.in_gate(0) && q.in_vel(0) == 0 && q.in_decay_lock(0) == 90);
+    for (int i = 6300; i < 7700; ++i) q.tick(ck);
+    CHECK(!q.in_gate(0));                                     // quarter row again
+    for (int i = 7700; i < 12300; ++i) q.tick(ck);
+    CHECK(q.in_gate(0) && q.in_decay_lock(0) == kNoLock);
+    for (int i = 12300; i < 17800; ++i) q.tick(ck);
+    CHECK(q.in_gate(0));                                      // tied
+    for (int i = 17800; i < 18300; ++i) q.tick(ck);
+    CHECK(!q.in_gate(0));                                     // OFF at row 3
+    CHECK(vca_source(*s, 0) == VcaInTrack && vca_source(*s, 1) == VcaOpen);
+
+    // Engine: a steady input through IN1's VCA, louder with more velocity.
+    auto level_for = [](uint8_t vel, VcaSrc src) {
+        auto a = make_song(false), b = make_song(false);
+        a->mix[4][MpVcaSrc] = src;
+        a->mix[4][MpVca] = 60;
+        a->mix[4][MpPan] = 64;
+        a->mix[5][MpMute] = 127;
+        a->master[MsDrive] = 0;
+        for (int d = 0; d < kDrumTracks; ++d) a->mix[d][MpMute] = 127;
+        a->cv[0][CpGate] = 0;
+        set_cell(*a, 0, kFirstInTrack, 0, 60, vel);
+        set_cell(*a, 0, kFirstCvTrack, 0, 48, vel);
+        a->mix[4][MpInGate] = 0;
+        auto e = std::make_unique<TrackerEngine>();
+        EngineIn in;
+        in.audio_connected[0] = true;
+        e->init(a.get(), b.get(), 0, in);
+        e->commands().push(Command{CmdType::PlayPattern, 0, 0, 0});
+        EngineOut o;
+        int32_t peak = 0;
+        for (int i = 0; i < 4000; ++i) {
+            in.audio[0] = (i & 32) ? 600 : -600;
+            e->process(in, o);
+            if (i > 2000) peak = std::max<int32_t>(peak, std::abs(o.audio[0]));
+        }
+        return peak;
+    };
+    const int32_t full = level_for(0, VcaInTrack), half = level_for(64, VcaInTrack), loud = level_for(127, VcaInTrack);
+    std::printf("  IN VCA level: vel default %d, 64 %d, 127 %d, open %d\n", full, half, loud, level_for(64, VcaOpen));
+    CHECK(half > 0 && half < loud * 3 / 4 && std::abs(full - loud) <= 2);
+    // Follow-CV mode: CV-track velocity is the VCA level (old songs: vel 0 = full).
+    const int32_t cv_half = level_for(64, VcaCvGate), cv_full = level_for(0, VcaCvGate);
+    CHECK(cv_half > 0 && cv_half < cv_full * 3 / 4);
+    CHECK(level_for(64, VcaOpen) == level_for(0, VcaOpen));
+}
+
+static void test_cvin_macros() {
+    auto s = make_song(false);
+    s->set_tempo(120);
+    s->cv[0][CpGate] = 8;
+    s->macro_cvin[MacroDecay] = 0x01;                          // CV1 only
+    set_cell(*s, 0, 4, 0, 48);
+    set_cell(*s, 0, 5, 0, 48);
+    Sequencer q;
+    q.attach(s.get());
+    auto gate_len = [&](int track_cv, int md) {
+        q.stop();
+        q.set_macros(md, 0);
+        q.play_pattern(0);
+        ClockIn ck;
+        int n = 0;
+        for (int i = 0; i < 6000; ++i) { q.tick(ck); if (q.gate(track_cv)) ++n; }
+        return n;
+    };
+    s->cv[1][CpGate] = 8;
+    CHECK(std::abs(gate_len(0, 0) - 3000) < 20);
+    CHECK(std::abs(gate_len(0, 8) - 4500) < 20);               // +4/16 -> 12/16 row
+    CHECK(gate_len(0, 63) > 5900);                             // longer than the row
+    CHECK(std::abs(gate_len(0, -64) - 375) < 20);              // clamps at 1/16 row
+    CHECK(std::abs(gate_len(1, 8) - 3000) < 20);              // CV2 not routed
+    s->cv[0][CpGate] = 0;                                      // ties stay ties
+    CHECK(gate_len(0, -64) > 5900);
+
+    // Effective values and Panel v3 bytes.
+    auto p = make_song(false);
+    EngineStatus st;
+    st.macro[0] = 40; st.macro[1] = -20;
+    p->cv[0][CpGate] = 8; p->cv[1][CpGate] = 0; p->cv[0][CpGlide] = 30;
+    p->mix[4][MpVca] = 50; p->mix[5][MpDrive] = 10;
+    p->macro_cvin[MacroDecay] = 0x0F; p->macro_cvin[MacroColour] = 0x0B;  // X: CV1, CV2, IN2
+    CHECK(proto::effective_cv(*p, st, 0, CpGate) == 28);
+    CHECK(proto::effective_cv(*p, st, 1, CpGate) == 0);
+    CHECK(proto::effective_cv(*p, st, 0, CpGlide) == 10);
+    CHECK(proto::effective_in(*p, st, 0, MpVca) == 90);
+    CHECK(proto::effective_in(*p, st, 0, MpDrive) == 0);       // IN1 not on X
+    CHECK(proto::effective_in(*p, st, 1, MpDrive) == 0);       // 10 - 20 clamps
+    proto::PanelView pv{{1, 2, 3}};
+    uint8_t b[64];
+    CHECK(proto::build_panel(b, st, *p, pv) == 38);
+    CHECK(b[28] == 0x0F && b[29] == 0x0B && b[30] == 28 && b[31] == 0 && b[32] == 10);
+    CHECK(b[34] == 90 && b[35] == 40 && b[36] == 0 && b[37] == 0);
+
+    // Mixer: Main lengthens the IN VCA decay when routed.
+    p->mix[4][MpVcaSrc] = VcaInTrack;
+    Mixer mx;
+    mx.set_macros(0, 0); mx.update(*p, 0);
+    CHECK(mx.source(0) == VcaInTrack && mx.source(1) == VcaOpen);
+}
+
+static void test_migration() {
+    // A v2 flash record (version 1, 6 tracks x 4-byte cells) loads as v3.
+    auto v3 = make_song(true);
+    v3->mix[4][MpVca] = 30;                                    // old song: VCA follows CV gate
+    std::vector<uint8_t> body(kV2SongBytes, 0);
+    SongHeader h2 = *v3;
+    h2.macro_cvin[0] = h2.macro_cvin[1] = 0;
+    for (int i = 0; i < kInputs; ++i) { h2.mix[4 + i][MpVcaSrc] = 0; h2.mix[4 + i][MpInGate] = 0; }
+    std::memcpy(body.data(), &h2, kSongHeaderBytes);
+    for (int p = 0; p < kPatterns; ++p)
+        for (int t = 0; t < kV2Tracks; ++t)
+            for (int r = 0; r < kRows; ++r) {
+                const Cell& c = v3->cells[p][t][r];
+                uint8_t* d = body.data() + kSongHeaderBytes + ((p * kV2Tracks + t) * kRows + r) * 4;
+                d[0] = c.note; d[1] = c.vel; d[2] = c.fx; d[3] = c.fxv;
+            }
+    std::vector<uint8_t> rec(store::kV2SlotSize, 0xFF);
+    const uint32_t crc = store::crc32(body.data(), kV2SongBytes) ^ 0xFFFFFFFFu;
+    store::put32(rec.data(), store::kSongMagic);
+    rec[4] = 1; rec[5] = 0; rec[6] = kV2SongBytes & 0xFF; rec[7] = kV2SongBytes >> 8;
+    store::put32(rec.data() + 8, crc);
+    store::put32(rec.data() + 12, ~crc);
+    std::memcpy(rec.data() + 16, body.data(), kV2SongBytes);
+    std::vector<uint8_t> empty(store::kSlotSize, 0xFF);
+    CHECK(store::slot_valid_v2(rec.data()));
+    CHECK(!store::slot_valid(rec.data()));
+    auto out = make_song(false);
+    CHECK(store::slot_load_any(empty.data(), rec.data(), *out));
+    CHECK(std::memcmp(out->name, v3->name, kNameLen) == 0 && out->tempo() == v3->tempo());
+    bool cells_ok = true;
+    for (int p = 0; p < kPatterns; ++p)
+        for (int t = 0; t < kTracks; ++t)
+            for (int r = 0; r < kRows; ++r) {
+                const Cell& a = out->cells[p][t][r];
+                const Cell& e = v3->cells[p][t][r];
+                if (t < kV2Tracks) {
+                    if (a.note != e.note || a.vel != e.vel || a.fx != e.fx || a.fxv != e.fxv) cells_ok = false;
+                } else if (a.note || a.vel || a.fx || a.fxv) {
+                    cells_ok = false;
+                }
+            }
+    CHECK(cells_ok);
+    CHECK(out->macro_cvin[0] == 0 && out->macro_cvin[1] == 0);  // macros act on drums only, as before
+    CHECK(out->mix[4][MpVcaSrc] == VcaAuto && vca_source(*out, 0) == VcaCvGate);
+    CHECK(vca_source(*out, 1) == VcaOpen);
+    CHECK(out->mix[4][MpInGate] == 8);
+    // A v3 record wins over the old one; a broken old one is ignored.
+    auto mine = make_song(false);
+    uint8_t header[store::kHeaderSize];
+    store::make_header(*mine, header);
+    std::vector<uint8_t> img(store::kSlotSize, 0xFF);
+    uint8_t page[store::kPageSize];
+    for (uint32_t k = 0; k < store::kRecordPages; ++k) {
+        store::record_page(*mine, header, k, page);
+        std::memcpy(&img[k * store::kPageSize], page, store::kPageSize);
+    }
+    CHECK(store::slot_load_any(img.data(), rec.data(), *out) && std::memcmp(out->name, "NEW SONG", 8) == 0);
+    rec[100] ^= 1;
+    CHECK(!store::slot_load_any(empty.data(), rec.data(), *out));
+
+    // A firmware 0.3.0 record (version 2, 8 tracks x 6-byte cells) at the
+    // current slot address: header kept, FX2 dropped (or moved into an empty FX1).
+    auto src = make_song(true);
+    std::vector<uint8_t> b3(kV030SongBytes, 0);
+    std::memcpy(b3.data(), static_cast<SongHeader*>(src.get()), kSongHeaderBytes);
+    auto cell3 = [&](int p, int t, int r) { return b3.data() + kSongHeaderBytes + ((p * kTracks + t) * kRows + r) * 6; };
+    for (int p = 0; p < kPatterns; ++p)
+        for (int t = 0; t < kTracks; ++t)
+            for (int r = 0; r < kRows; ++r) {
+                const Cell& c = src->cells[p][t][r];
+                uint8_t* d = cell3(p, t, r);
+                d[0] = c.note; d[1] = c.vel; d[2] = c.fx; d[3] = c.fxv;
+            }
+    uint8_t* x = cell3(2, 2, 15); x[0] = 84; x[2] = 'R'; x[3] = 4; x[4] = 'P'; x[5] = 60;   // two effects
+    uint8_t* y = cell3(0, 7, 3); y[0] = 60; y[2] = 0; y[3] = 0; y[4] = 'K'; y[5] = 8;        // FX2 only
+    std::vector<uint8_t> r3(store::kSlotSize, 0xFF);
+    const uint32_t crc3 = store::crc32(b3.data(), kV030SongBytes) ^ 0xFFFFFFFFu;
+    store::put32(r3.data(), store::kSongMagic);
+    r3[4] = 2; r3[5] = 0; r3[6] = kV030SongBytes & 0xFF; r3[7] = (kV030SongBytes >> 8) & 0xFF;
+    store::put32(r3.data() + 8, crc3);
+    store::put32(r3.data() + 12, ~crc3);
+    std::memcpy(r3.data() + 16, b3.data(), kV030SongBytes);
+    CHECK(store::slot_valid_v030(r3.data()) && !store::slot_valid(r3.data()));
+    CHECK(store::slot_load_any(r3.data(), rec.data(), *out));   // wins over a (broken) old record
+    CHECK(std::memcmp(out->name, src->name, kNameLen) == 0 && out->macro_cvin[0] == src->macro_cvin[0]);
+    CHECK(out->mix[4][MpVcaSrc] == src->mix[4][MpVcaSrc]);
+    CHECK(out->cells[2][2][15].fx == 'R' && out->cells[2][2][15].fxv == 4);
+    CHECK(out->cells[0][7][3].note == 60 && out->cells[0][7][3].fx == 'K' && out->cells[0][7][3].fxv == 8);
+    CHECK(out->cells[0][0][0].note == src->cells[0][0][0].note && out->cells[1][3][0].fx == src->cells[1][3][0].fx);
+    // Saving writes the new format over it (9 sectors).
+    for (uint32_t k = 0; k < store::kRecordPages; ++k) {
+        store::record_page(*mine, header, k, page);
+        std::memcpy(&r3[k * store::kPageSize], page, store::kPageSize);
+    }
+    CHECK(store::slot_valid(r3.data()) && !store::slot_valid_v030(r3.data()));
+}
+
+static void test_protocol_v4() {
+    auto s = make_song(false);
+    TestHost h(s.get());
+    proto::Protocol pr(h);
+    auto feed = [&](const std::vector<uint8_t>& v) { pr.feed(v.data(), static_cast<int>(v.size())); };
+    feed(sysex({proto::SetCell, 2, 7, 3, 61, 90, 'G', 4}));
+    const Cell& c = s->cells[2][7][3];
+    CHECK(c.note == 61 && c.vel == 90 && c.fx == 'G' && c.fxv == 4);
+    feed(sysex({proto::SetCell, 2, 7, 3, 60, 91, 'R', 3, 'P', 50}));   // 0.3.0 editor: FX2 dropped
+    CHECK(c.note == 60 && c.vel == 91 && c.fx == 'R' && c.fxv == 3);
+    feed(sysex({proto::SetCell, 2, 7, 3, 60, 91, 0, 0, 'P', 50}));       // 0.3.0 editor, only FX2: moved into FX
+    CHECK(c.fx == 'P' && c.fxv == 50);
+    feed(sysex({proto::SetCell, 2, 7, 3, 60, 91, 0, 0}));                 // 4-byte form clears it
+    CHECK(c.fx == 0 && c.fxv == 0);
+    feed(sysex({proto::SetCells, 1, 6, 0, 2, 63, 1, 'G', 2, 62, 2, 0, 0}));
+    CHECK(s->cells[1][6][0].note == 63 && s->cells[1][6][0].fx == 'G' && s->cells[1][6][1].note == 62);
+    feed(sysex({proto::SetCells, 1, 6, 0, 2, 60, 1, 'D', 9, 'K', 4, 64, 2, 0, 0, 0, 0}));   // 0.3.0 6-byte cells
+    CHECK(s->cells[1][6][0].note == 60 && s->cells[1][6][0].fx == 'D' && s->cells[1][6][1].note == 64);
+    const uint32_t rej = pr.rejected();
+    feed(sysex({proto::SetCell, 0, 8, 0, 60, 0, 0, 0}));          // track 8
+    feed(sysex({proto::SetCells, 0, 0, 0, 2, 1, 1, 1, 1, 1}));    // wrong length
+    feed(sysex({proto::Preview, 8, 60, 100}));
+    CHECK(pr.rejected() == rej + 3);
+    feed(sysex({proto::Preview, 7, 60, 100}));
+    CHECK(h.cmds.back().type == CmdType::Preview && h.cmds.back().a == 7);
+    feed(sysex({proto::SetMacroMask, 0, 0x0F, 0x05}));
+    CHECK(s->macro_excl[0] == 0 && s->macro_cvin[0] == 0x05);
+    feed(sysex({proto::SetMacroMask, 1, 0x03}));                  // v2 form keeps CV/IN bits
+    CHECK(s->macro_excl[1] == 0x0C && s->macro_cvin[1] == 0x0F);
+    feed(sysex({proto::SetMix, 5, MpVcaSrc, VcaInTrack}));
+    CHECK(vca_source(*s, 1) == VcaInTrack);
+    // Status: IN gates in bits 2/3 of the gate byte.
+    EngineStatus st;
+    st.in_gate[1] = 1; st.gate[0] = 1;
+    Mixer mx;
+    uint8_t b[64];
+    proto::build_status(b, st, *s, mx, 0, 0, 0);
+    CHECK(b[16] == (1 | 8));
+}
+
 int main() {
     test_dsp();
     test_voices();
@@ -651,6 +1086,12 @@ int main() {
     test_store();
     test_engine();
     test_macros_v2();
+    test_slot_select_bug();
+    test_fx();
+    test_in_tracks();
+    test_cvin_macros();
+    test_migration();
+    test_protocol_v4();
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -1,4 +1,4 @@
-// The whole card minus the hardware: sequencer + 4 drum voices + mixer +
+// The whole card minus the hardware: sequencer (8 tracks) + 4 drum voices + mixer +
 // panel. Runs one sample per process() call on core 0. Core 1 (USB / flash)
 // talks to it through a lock-free command queue, the live/spare song
 // pointers and a status block. Host-testable.
@@ -46,9 +46,11 @@ enum class CmdType : uint8_t {
     Stop,
     CueEntry,      // a = entry (song mode) / cue pattern (pattern mode)
     Preview,       // a = track, b = note, c = vel
-    SwapSong,      // swap live <-> spare; a = 1 immediately, 0 at pattern end
+    SwapSong,      // swap live <-> spare; a = 1 immediately, 0 at pattern end;
+                   // b = slot + 1 the new song belongs to once swapped (0 = keep)
     NextPart,
     SetSlot,       // a = slot number the live song now belongs to
+    CancelSwap,    // drop a swap still waiting for the pattern end
 };
 
 struct Command {
@@ -85,6 +87,7 @@ struct EngineStatus {
     volatile int32_t macro[3] = {0, 0, 0};
     volatile uint32_t cv_note[2] = {0, 0};
     volatile uint32_t gate[2] = {0, 0};
+    volatile uint32_t in_gate[2] = {0, 0};            // IN1/IN2 VCA gates (v3)
     volatile uint32_t trig_count[kDrumTracks] = {};
     // Panel state for the editor's knob feedback (protocol v2).
     volatile int32_t knob[3] = {2048, 2048, 2048};   // raw 0..4095
@@ -168,7 +171,9 @@ public:
         // --- drum triggers queued on the previous sample --------------------
         // At most one per sample keeps the worst case flat.
         DrumEvent e;
-        if (seq_.pop_drum(e)) trigger(e, m_decay, m_color);
+        const bool trig = seq_.pop_drum(e);
+        if (trig) trigger(e, m_decay, m_color);
+        seq_.set_macros(m_decay, m_color);
 
         // --- sequencer --------------------------------------------------------
         ClockIn ck;
@@ -191,9 +196,28 @@ public:
         ch[5] = static_cast<int32_t>(in.audio[1]) << 4;
         if (in.audio_connected[0]) live_mask |= 1u << 4;
         if (in.audio_connected[1]) live_mask |= 1u << 5;
-        mixer_.set_gate(0, seq_.gate(0));
-        mixer_.set_gate(1, seq_.gate(1));
-        mixer_.update_step(*live_, m_filter);
+        // Deferrable work skips the samples that start a voice or a note (the
+        // heaviest jobs), which keeps the worst-case sample flat.
+        // Input VCA control about every 4th sample (~100 us, far below the
+        // 1.3 ms attack).
+        if (vca_div_ > 0) --vca_div_;
+        // (never starved: after 32 busy samples in a row it runs anyway)
+        bool busy = trig || seq_.worked();
+        if (busy && ++busy_run_ >= 32) busy = false;
+        if (!busy) busy_run_ = 0;
+        if (vca_div_ == 0 && !busy) {
+            vca_div_ = 4;
+            for (int i = 0; i < kInputs; ++i) {
+                const VcaSrc src = mixer_.source(i);
+                if (src == VcaCvGate) mixer_.set_vca(i, seq_.gate(i), seq_.cv_vel(i), kNoLock);
+                else if (src == VcaInTrack) mixer_.set_vca(i, seq_.in_gate(i), seq_.in_vel(i), seq_.in_decay_lock(i));
+            }
+        }
+        // Mixer coefficients: one channel per quiet sample.
+        if (!busy) {
+            mixer_.set_macros(m_decay, m_color);
+            mixer_.update_step(*live_, m_filter);
+        }
         mixer_.process(ch, live_mask, out.audio[0], out.audio[1]);
 
         for (int i = 0; i < kCvTracks; ++i) {
@@ -222,9 +246,17 @@ private:
             seq_.preview(c.a, c.b, c.c);
             break;
         case CmdType::SwapSong:
+            swap_slot_ = c.b;
             seq_.request_song(spare_, c.a != 0);
             pending_swap_ = true;
             if (seq_.take_swapped()) on_swapped();
+            break;
+        case CmdType::CancelSwap:
+            if (seq_.cancel_pending()) {
+                pending_swap_ = false;
+                status_.swap_count = status_.swap_count + 1;   // counts as done for core 1
+                swap_slot_ = 0;
+            }
             break;
         case CmdType::NextPart: seq_.queue_next(); break;
         case CmdType::SetSlot:
@@ -241,6 +273,11 @@ private:
         live_ = spare_;
         spare_ = old;
         mixer_.update(*live_, 0);
+        if (swap_slot_ > 0) {
+            status_.slot = static_cast<uint32_t>(swap_slot_ - 1);
+            panel_.set_slot(swap_slot_ - 1);
+        }
+        swap_slot_ = 0;
         status_.swap_count = status_.swap_count + 1;
     }
 
@@ -254,9 +291,9 @@ private:
         const int sens = p[DpLevelVel];
         a.vel = static_cast<uint8_t>(clampi(127 - (((127 - e.vel) * sens) >> 7), 1, 127));
         int decay = p[DpDecay], pa = p[DpA], pb = p[DpB];
-        if (e.fx == FxDecay) decay = e.fxv;
-        if (e.fx == FxParamA) pa = e.fxv;
-        if (e.fx == FxParamB) pb = e.fxv;
+        if (e.decay != kNoLock) decay = e.decay;
+        if (e.a != kNoLock) pa = e.a;
+        if (e.b != kNoLock) pb = e.b;
         // Macros are offsets on top of the song value (never stored), and only
         // for the voices routed to them in the song header.
         if (macro_on(*live_, MacroDecay, e.track)) decay += m_decay;
@@ -317,6 +354,7 @@ private:
         for (int i = 0; i < kCvTracks; ++i) {
             status_.cv_note[i] = seq_.cv_note(i);
             status_.gate[i] = seq_.gate(i) ? 1u : 0u;
+            status_.in_gate[i] = seq_.in_gate(i) ? 1u : 0u;
         }
     }
 
@@ -330,6 +368,9 @@ private:
     EngineStatus status_;
     volatile int slot_request_ = -1;
     volatile bool pending_swap_ = false;
+    uint8_t swap_slot_ = 0;
+    int vca_div_ = 0;
+    int busy_run_ = 0;
     volatile bool busy_ = false;
     int warmup_ = 0;
     int transpose_ = 0;

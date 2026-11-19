@@ -94,3 +94,40 @@ test('v2: SetMacroMask + Panel report match the firmware', { skip }, async () =>
   }
   assert.equal(m.effFilter, effectiveFilter(s, m.macros));
 });
+
+test('v3/v4: IN tracks, CV/IN macro routing and Panel v3 match the firmware', { skip }, async () => {
+  const { effectiveCv, effectiveIn } = await import('../js/protocol.js');
+  const s = new Song();
+  s.setCell(4, 7, 63, { note: 60, vel: 90, fx: 0x44, fxv: 20 });
+  s.setCell(0, 6, 0, { note: 60, vel: 127, fx: 0x50, fxv: 40 });
+  s.setCv(0, 0, 8); s.setCv(1, 0, 0); s.setCv(0, 1, 30); s.setCv(1, 1, 5);
+  s.setMix(4, 4, 50); s.setMix(5, 4, 100); s.setMix(4, 2, 30); s.setMix(5, 2, 10); s.setMix(4, 6, 3);
+  s.setMacroMask(0, 0b0011); s.setMacroCvMask(0, 0b0101);
+  s.setMacroMask(1, 0b1100); s.setMacroCvMask(1, 0b1010);
+  const stream = [
+    msg.setHeader(new Song()),
+    msg.setCell(4, 7, 63, s.getCell(4, 7, 63)),
+    msg.setCells(s, 0, 6, 0, 1),
+    msg.setCv(0, 0, 8), msg.setCv(1, 0, 0), msg.setCv(0, 1, 30), msg.setCv(1, 1, 5),
+    msg.setMix(4, 4, 50), msg.setMix(5, 4, 100), msg.setMix(4, 2, 30), msg.setMix(5, 2, 10), msg.setMix(4, 6, 3),
+    msg.setMacroMask(0, 0b0011, 0b0101), msg.setMacroMask(1, 0b1100, 0b1010),
+  ];
+  const back = roundTrip(stream);
+  assert.deepEqual(raw(back), raw(s));
+  // The 0.3.0 forms (9-byte SetCell, 6-byte cells) are accepted; FX2 is dropped.
+  const old = roundTrip([msg.setHeader(new Song()), msg.setCell(4, 7, 63, s.getCell(4, 7, 63), 3), msg.setCells(s, 0, 6, 0, 1, 3),
+    msg.setCv(0, 0, 8), msg.setCv(1, 0, 0), msg.setCv(0, 1, 30), msg.setCv(1, 1, 5),
+    msg.setMix(4, 4, 50), msg.setMix(5, 4, 100), msg.setMix(4, 2, 30), msg.setMix(5, 2, 10), msg.setMix(4, 6, 3),
+    msg.setMacroMask(0, 0b0011, 0b0101), msg.setMacroMask(1, 0b1100, 0b1010)]);
+  assert.deepEqual(raw(old), raw(s));
+  const reply = execFileSync(bin, ['panel'], { input: Buffer.concat(stream.map((m) => Buffer.from(m))) });
+  const m = decode(splitSysex(reply)[0]);
+  assert.equal(m.v3, true);
+  assert.deepEqual(m.cvinMasks, [0b0101, 0b1010]);
+  for (let c = 0; c < 2; c++) {
+    assert.equal(m.effCvGate[c], effectiveCv(s, m.macros, c, 0), `gate ${c}`);
+    assert.equal(m.effCvGlide[c], effectiveCv(s, m.macros, c, 1), `glide ${c}`);
+    assert.equal(m.effInDecay[c], effectiveIn(s, m.macros, c, 4), `in decay ${c}`);
+    assert.equal(m.effInDrive[c], effectiveIn(s, m.macros, c, 2), `in drive ${c}`);
+  }
+});

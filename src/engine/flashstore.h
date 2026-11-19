@@ -1,8 +1,13 @@
 // Flash layout and record format for saved songs (host-testable part).
 //
 // The last 4 KB sector of the 2 MB program-card flash holds a small
-// append-only journal with the last-used slot. Below it are 6 song slots of
-// 28 KB (7 sectors) each. A slot is a 16-byte header followed by the Song.
+// append-only journal with the last-used slot. Below it are the 6 song
+// slots of firmware 0.1/0.2 (28 KB = 7 sectors each), which are only read
+// (old songs are converted when loaded). Below those are the 6 current slots,
+// spaced 52 KB (13 sectors) apart because firmware 0.3.0 wrote 52 KB songs
+// there. Firmware 0.3.1 writes a 36 KB record (9 sectors) at the same place
+// and still reads a 0.3.0 record it finds there. A slot is a 16-byte header
+// followed by the Song.
 // All writing happens on core 1; the firmware is built copy_to_ram so the
 // audio interrupt on core 0 never touches flash while it is being written.
 // SPDX-License-Identifier: MIT
@@ -19,22 +24,33 @@ namespace store {
 constexpr uint32_t kSectorSize = 4096;
 constexpr uint32_t kPageSize = 256;
 constexpr int kSlots = 6;
-constexpr uint32_t kSlotSectors = 7;
-constexpr uint32_t kSlotSize = kSlotSectors * kSectorSize;      // 28672
+constexpr uint32_t kSlotStrideSectors = 13;                      // 0.3.0 slot size, kept for its records
+constexpr uint32_t kSlotSize = kSlotStrideSectors * kSectorSize; // 53248 (distance between slots)
+constexpr uint32_t kV2SlotSectors = 7;
+constexpr uint32_t kV2SlotSize = kV2SlotSectors * kSectorSize;  // 28672
 constexpr uint32_t kHeaderSize = 16;
 constexpr uint32_t kRecordSize = kHeaderSize + sizeof(Song);
 constexpr uint32_t kRecordPages = (kRecordSize + kPageSize - 1) / kPageSize;
+constexpr uint32_t kSlotSectors = (kRecordSize + kSectorSize - 1) / kSectorSize;   // 9 sectors written per save
+static_assert(kSlotSectors == 9, "32,996-byte record");
 constexpr uint32_t kSongMagic = 0x4B525457u;   // 'WTRK'
 constexpr uint32_t kSysMagic = 0x59535457u;    // 'WTSY'
-constexpr uint16_t kFormatVersion = 1;
+constexpr uint16_t kFormatVersion = 3;          // 0.3.1: 8 tracks, 4-byte cells
+constexpr uint16_t kV030FormatVersion = 2;      // 0.3.0: 8 tracks, 6-byte cells (two effects)
+constexpr uint16_t kV2FormatVersion = 1;        // 0.1/0.2: 6 tracks, 4-byte cells
 static_assert(kRecordPages * kPageSize <= kSlotSize, "song must fit a slot");
+static_assert(kHeaderSize + kV2SongBytes <= kV2SlotSize, "v2 layout");
+static_assert(kHeaderSize + kV030SongBytes <= kSlotSize, "0.3.0 layout");
 
 // Offsets from the start of flash, for a firmware built for flash_size bytes.
 constexpr uint32_t sys_offset(uint32_t flash_size) { return flash_size - kSectorSize; }
-constexpr uint32_t slot_offset(uint32_t flash_size, int slot) {
-    return sys_offset(flash_size) - static_cast<uint32_t>(kSlots - slot) * kSlotSize;
+constexpr uint32_t v2_slot_offset(uint32_t flash_size, int slot) {
+    return sys_offset(flash_size) - static_cast<uint32_t>(kSlots - slot) * kV2SlotSize;
 }
-constexpr uint32_t reserved_bytes() { return kSectorSize + kSlots * kSlotSize; }   // 176 KB
+constexpr uint32_t slot_offset(uint32_t flash_size, int slot) {
+    return v2_slot_offset(flash_size, 0) - static_cast<uint32_t>(kSlots - slot) * kSlotSize;
+}
+constexpr uint32_t reserved_bytes() { return kSectorSize + kSlots * (kV2SlotSize + kSlotSize); }   // 484 KB
 
 inline uint32_t crc32(const uint8_t* d, uint32_t n, uint32_t crc = 0xFFFFFFFFu) {
     for (uint32_t i = 0; i < n; ++i) {
@@ -57,20 +73,39 @@ inline void make_header(const Song& s, uint8_t h[kHeaderSize]) {
     put32(h + 12, ~crc);
 }
 
-// Validate a slot image in memory-mapped flash (or a test buffer).
-inline bool slot_valid(const uint8_t* rec) {
+inline bool record_valid(const uint8_t* rec, uint16_t version, uint32_t size) {
     if (get32(rec) != kSongMagic) return false;
-    if ((rec[4] | (rec[5] << 8)) != kFormatVersion) return false;
-    if ((rec[6] | (rec[7] << 8)) != static_cast<int>(sizeof(Song) & 0xFFFF)) return false;
+    if ((rec[4] | (rec[5] << 8)) != version) return false;
+    if (static_cast<uint32_t>(rec[6] | (rec[7] << 8)) != (size & 0xFFFF)) return false;
     const uint32_t crc = get32(rec + 8);
     if (get32(rec + 12) != ~crc) return false;
-    return (crc32(rec + kHeaderSize, sizeof(Song)) ^ 0xFFFFFFFFu) == crc;
+    return (crc32(rec + kHeaderSize, size) ^ 0xFFFFFFFFu) == crc;
 }
+
+// Validate a current slot image in memory-mapped flash (or a test buffer).
+inline bool slot_valid(const uint8_t* rec) { return record_valid(rec, kFormatVersion, sizeof(Song)); }
+// Validate a slot written by firmware 0.3.0 (same address, two effect columns).
+inline bool slot_valid_v030(const uint8_t* rec) { return record_valid(rec, kV030FormatVersion, kV030SongBytes); }
+// Validate a slot written by firmware v0.1/v0.2.
+inline bool slot_valid_v2(const uint8_t* rec) { return record_valid(rec, kV2FormatVersion, kV2SongBytes); }
 
 inline bool slot_load(const uint8_t* rec, Song& out) {
     if (!slot_valid(rec)) return false;
     std::memcpy(&out, rec + kHeaderSize, sizeof(Song));
     song_sanitize(out);
+    return true;
+}
+
+// Load slot k: the current record if valid, else convert a 0.3.0 record at
+// the same address, else the old 0.1/0.2 record.
+inline bool slot_load_any(const uint8_t* rec, const uint8_t* v2_rec, Song& out) {
+    if (slot_load(rec, out)) return true;
+    if (slot_valid_v030(rec)) {
+        song_from_v030(rec + kHeaderSize, out);
+        return true;
+    }
+    if (!slot_valid_v2(v2_rec)) return false;
+    song_from_v2(v2_rec + kHeaderSize, out);
     return true;
 }
 

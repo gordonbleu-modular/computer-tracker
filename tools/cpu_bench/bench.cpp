@@ -16,7 +16,10 @@ volatile int32_t sink;
 // scenario 0: idle (stopped, no inputs)
 // scenario 1: typical demo song playing
 // scenario 2: worst case: 4 x modal voices retriggered every row with
-//             ratchets, both inputs with drive/tone/VCA, master filter on
+//             ratchets, both CV tracks sliding/ratcheting,
+//             both IN tracks ratcheting (IN1 own track, IN2
+//             following CV2), inputs with drive/tone/VCA, macros routed,
+//             master filter on
 extern "C" void bench_init(int scenario) {
     eng = new (eng_mem) TrackerEngine();
     if (scenario == 2) {
@@ -28,10 +31,15 @@ extern "C" void bench_init(int scenario) {
             song_a.drum[v][DpB] = 100;
         }
         for (int r = 0; r < 16; ++r) {
-            for (int t = 0; t < kDrumTracks; ++t) set_cell(song_a, 0, t, r, static_cast<uint8_t>(40 + t * 7), 127, FxRatchet, 4);
-            set_cell(song_a, 0, 4, r, static_cast<uint8_t>(40 + r), 0, FxSlide, 30);
-            set_cell(song_a, 0, 5, r, static_cast<uint8_t>(50 + r), 0, FxRatchet, 3);
+            for (int t = 0; t < kDrumTracks; ++t)
+                set_cell(song_a, 0, t, r, static_cast<uint8_t>(40 + t * 7), 127, FxRatchet, 4);
+            set_cell(song_a, 0, 4, r, static_cast<uint8_t>(40 + r), 90, FxSlide, 30);
+            set_cell(song_a, 0, 5, r, static_cast<uint8_t>(50 + r), 90, FxRatchet, 3);
+            set_cell(song_a, 0, 6, r, 60, 100, FxRatchet, 4);
+            set_cell(song_a, 0, 7, r, 60, 80, FxRatchet, 8);
         }
+        song_a.mix[4][MpVcaSrc] = VcaInTrack;
+        song_a.mix[5][MpVcaSrc] = VcaCvGate;
         for (int ch = 0; ch < kChannels; ++ch) {
             song_a.mix[ch][MpDrive] = 60;
             song_a.mix[ch][MpTone] = 30;

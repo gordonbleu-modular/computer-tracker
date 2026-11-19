@@ -1,5 +1,5 @@
 // Stereo mixer: 4 drum channels + 2 audio inputs (the Workshop System VCOs)
-// -> drive -> tone -> gate-following VCA (inputs) -> level/pan -> master
+// -> drive -> tone -> VCA (inputs: open, CV gate or IN track) -> level/pan -> master
 // filter (performance macro) -> master drive -> 12-bit outputs.
 // SPDX-License-Identifier: MIT
 #pragma once
@@ -15,7 +15,7 @@ struct ChannelState {
     int32_t tone_a = 0;               // one-pole coefficient Q15
     int8_t tone_mode = 0;             // -1 LP, 0 bypass, 1 HP
     int32_t lp = 0;
-    int32_t vca = 0;                  // input VCA release coef (0 = off)
+    int32_t vca = 0;                  // input VCA release coef (0 = VCA open)
     int32_t vca_env = 32767;
     int32_t peak = 0;
 };
@@ -26,6 +26,9 @@ public:
     void update(const Song& s, int filter_macro /* -64..63 */) {
         for (int i = 0; i <= kChannels; ++i) update_one(s, i, filter_macro);
     }
+
+    // Panel macro offsets for the inputs (Main = VCA decay, X = drive), when routed.
+    void set_macros(int m_decay, int m_colour) { m_decay_ = m_decay; m_colour_ = m_colour; }
 
     // Spread the work: one channel (or the master) per call, every sample.
     void update_step(const Song& s, int filter_macro) {
@@ -41,7 +44,9 @@ public:
             const int32_t lvl = m[MpMute] >= 64 ? 0 : T.level[m[MpLevel]];   // Q12
             c.gain_l = (lvl * T.pan_l[m[MpPan]]) >> 12;
             c.gain_r = (lvl * T.pan_r[m[MpPan]]) >> 12;
-            c.drive = m[MpDrive] ? 16 + m[MpDrive] / 2 : 0;
+            int drive = m[MpDrive];
+            if (ch >= kDrumTracks && macro_on_in(s, MacroColour, ch - kDrumTracks)) drive = clampi(drive + m_colour_, 0, 127);
+            c.drive = drive ? 16 + drive / 2 : 0;
             const int tone = m[MpTone];
             if (tone < 60) {
                 c.tone_mode = -1;
@@ -52,7 +57,12 @@ public:
             } else {
                 c.tone_mode = 0;
             }
-            c.vca = m[MpVca] ? T.decay_coef[clampi(m[MpVca], 0, 127)] : 0;
+            if (ch >= kDrumTracks) {
+                const int i = ch - kDrumTracks;
+                src_[i] = vca_source(s, i);
+                decay_off_[i] = macro_on_in(s, MacroDecay, i) ? m_decay_ : 0;
+                c.vca = src_[i] == VcaOpen ? 0 : T.decay_coef[clampi(m[MpVca] + decay_off_[i], 0, 127)];
+            }
             return;
         }
         master_gain_ = T.level[s.master[MsLevel]];
@@ -69,8 +79,16 @@ public:
         }
     }
 
-    // Input VCA: gate from the matching CV track.
-    void set_gate(int input, bool g) { gate_[input] = g; }
+    // What opens input i's VCA (from the song, refreshed by update_one).
+    VcaSrc source(int input) const { return src_[input]; }
+    // Input VCA control for this sample: gate, velocity (0 = full level) and a
+    // per-step decay lock (kNoLock-style 0xFF = use the song's decay).
+    void set_vca(int input, bool g, uint8_t vel, uint8_t decay_lock) {
+        gate_[input] = g;
+        level_[input] = vel ? vel * 258 : 32767;
+        lock_[input] = decay_lock;
+    }
+    void set_gate(int input, bool g) { set_vca(input, g, 0, 0xFF); }
 
     // in[0..3] drum voices (Q15), in[4..5] audio inputs (Q15).
     // Writes 12-bit outputs.
@@ -88,10 +106,13 @@ public:
             }
             if (ch >= kDrumTracks && c.vca) {
                 ChannelState& cs = c;
-                if (gate_[ch - kDrumTracks]) {
-                    cs.vca_env += (32767 - cs.vca_env) >> 6;           // ~1.3 ms attack
+                const int i = ch - kDrumTracks;
+                if (gate_[i]) {
+                    cs.vca_env += (level_[i] - cs.vca_env) >> 6;      // ~1.3 ms attack (or level change)
                 } else if ((vca_tick_ & 7) == 0) {
-                    cs.vca_env = (cs.vca_env * cs.vca) >> 16;
+                    const int32_t coef = lock_[i] == 0xFF ? cs.vca
+                                         : g_tables.decay_coef[clampi(lock_[i] + decay_off_[i], 0, 127)];
+                    cs.vca_env = (cs.vca_env * coef) >> 16;
                 }
                 x = (x * cs.vca_env) >> 15;
             }
@@ -137,6 +158,11 @@ private:
 
     ChannelState ch_[kChannels];
     bool gate_[kInputs] = {false, false};
+    int32_t level_[kInputs] = {32767, 32767};
+    uint8_t lock_[kInputs] = {0xFF, 0xFF};
+    VcaSrc src_[kInputs] = {VcaOpen, VcaOpen};
+    int decay_off_[kInputs] = {0, 0};
+    int m_decay_ = 0, m_colour_ = 0;
     uint32_t vca_tick_ = 0;
     int32_t master_gain_ = 4096, master_drive_ = 16;
     int8_t mf_mode_ = 0;

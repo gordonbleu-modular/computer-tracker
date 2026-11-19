@@ -1,4 +1,4 @@
-# Workshop Tracker USB protocol (v2)
+# Workshop Tracker USB protocol (v4)
 
 The card appears as a **USB-MIDI device** called **"Workshop Tracker"**
 (VID `0x2E8A`, PID `0x10C1`). All editor traffic is **SysEx**; no notes or CCs
@@ -27,28 +27,35 @@ with the JS implementation.
 | Item | Size | Notes |
 | --- | --- | --- |
 | Patterns | 16 | each 1–64 rows (`pat_len`) |
-| Tracks | 6 | 0–3 drum voices, 4–5 CV/gate |
-| Cell | 4 bytes | `note, vel, fx, fxv` |
+| Tracks | 8 | 0–3 drum voices, 4–5 CV/gate, 6–7 IN1/IN2 (VCAs of the audio inputs) (v3; v2: 6) |
+| Cell | 4 bytes | `note, vel, fx, fxv`: one effect per step (v3 / fw 0.3.0 had 6 bytes with a second effect) |
 | Song (arrangement) | 32 entries | `{pattern, repeats 1–16}`, `song_len` 1–32 |
 | Header | 212 bytes | see the table below |
-| Whole song | 24,788 bytes | header + 16×6×64×4 cells |
+| Whole song | 32,980 bytes | header + 16×8×64×4 cells (v3: 49,364; v2: 24,788) |
 
 **Cell**
 
-* `note`: 0 = empty, 1–126 = MIDI note, 127 = OFF (choke drum / gate off)
-* `vel`: 0 = default (100), 1–127
-* `fx`: 0 = none or an ASCII letter (below); `fxv` 0–127
+* `note`: 0 = empty, 1–126 = MIDI note, 127 = OFF (choke drum / gate off / close the IN VCA).
+  On IN tracks any note is just a trigger (the editor shows `TRG`).
+* `vel`: 0 = default, 1–127. Drums: hit strength (default 100). IN tracks: VCA
+  level (default = full). CV tracks: VCA level of the matching audio input while
+  that input follows the CV gate (`vcaSrc` CV GATE or AUTO with decay > 0), else no effect.
+* `fx`: 0 = none or an ASCII letter (below); `fxv` 0–127.
 
 | fx | Tracks | Meaning |
 | --- | --- | --- |
 | `A` | drum | lock param A for this hit |
 | `B` | drum | lock param B |
-| `D` | drum | lock decay |
-| `G` | CV | gate length in 1/16 row (0 = tie to the next note) |
+| `D` | drum, IN | lock decay (IN: VCA release for this trigger) |
+| `G` | CV, IN | gate length in 1/16 row (0 = hold until the next note/OFF) |
 | `S` | CV | slide: glide amount, gate stays high (legato) |
-| `R` | both | ratchet: 2–8 evenly spaced hits in the row |
-| `P` | both | probability in % (0–100) |
-| `K` | both | delay by n/16 row (1–15) |
+| `R` | all | ratchet: 2–8 evenly spaced hits in the row |
+| `P` | all | probability in % (0–99) |
+| `K` | all | delay by n/16 row (1–15) |
+
+The editor shows and takes every value as two decimal digits: `vel` and the
+`A B D S` values are scaled 00–99 ↔ 0–127 (exact round trip), the `G R P K`
+values are the plain numbers.
 
 **Header layout** (offsets in bytes; mirrors `struct SongHeader` in `song.h`)
 
@@ -60,13 +67,20 @@ with the JS implementation.
 | 15 | 1 | song_len |
 | 16 | 1 | cv_zero_note (MIDI note that outputs 0 V, default 36 = C2) |
 | 17 | 2 | macro_excl[2] (v2): PERFORM macro routing, [0] = decay macro (Main knob), [1] = colour macro (X knob). **Bit v set = drum voice v is *not* affected.** Stored inverted so that 0 (old songs, v1 flash slots) means "all voices". |
-| 19 | 9 | reserved (0) |
+| 19 | 2 | macro_cvin[2] (v3): routing of Main [0] / X [1] to the CV and IN modules, **bit set = routed**: bit 0/1 = CV1/CV2 (Main: gate length, X: glide), bit 2/3 = IN1/IN2 (Main: VCA decay, X: drive). New songs: 0x0F. Songs migrated from v2: 0. |
+| 21 | 7 | reserved (0) |
 | 28 | 16 | pat_len[16] |
 | 44 | 64 | entries[32] {pattern, repeats} |
 | 108 | 32 | drum[4][8]: engine, decay, A, B, tune (64 = 0), vel-sens, –, – |
 | 140 | 16 | cv[2][8]: gate (1/16 row, 0 = tie), glide, transpose (64 = 0), … |
-| 156 | 48 | mix[6][8]: level, pan (64 = C), drive, tone (64 = flat), gate-VCA, mute (≥64), –, – |
+| 156 | 48 | mix[6][8]: level, pan (64 = C), drive, tone (64 = flat), VCA decay, mute (≥64), vcaSrc, inGate. `vcaSrc` and `inGate` are only used on the IN channels 4–5 (v3). |
 | 204 | 8 | master: level, drive, filter (64 = off), … |
+
+**IN channel VCA** (mix[4/5]): `vcaSrc` 0 = AUTO (v2 behaviour: follows CV/gate
+track n when the VCA decay is > 0, else open), 1 = OPEN, 2 = CV GATE (follows
+CV/gate track n, its velocity = level), 3 = IN TRACK (the IN track's TRIG/LVL).
+`inGate` = how long an IN trigger keeps the VCA open, in 1/16 row (0 = until
+the next trigger/OFF, default 8). The VCA decay is the release time after the gate.
 
 The firmware sanitises every incoming value (`header_sanitize`, `set_cell`),
 so a buggy or malicious host cannot put the engine in a bad state.
@@ -76,14 +90,14 @@ so a buggy or malicious host cannot put the engine in a bad state.
 | Cmd | Name | Payload |
 | --- | --- | --- |
 | 01 | Hello | – → card answers **Info** |
-| 02 | GetSong | – → **SongHeader**, 384 × **PatternChunk**, **DumpEnd** |
+| 02 | GetSong | – → **SongHeader**, 512 × **PatternChunk**, **DumpEnd** (fw 0.2: 384) |
 | 09 | Ping | – (keep-alive; while pings arrive at least every 3 s the card streams **Status** every 50 ms) |
-| 10 | SetCell | pat, track, row, note, vel, fx, fxv |
-| 11 | SetCells | pat, track, row0, count (≤16), count × 4 cell bytes |
+| 10 | SetCell | pat, track, row, note, vel, fx, fxv (7 bytes; the 9-byte form of a 0.3.0 editor is accepted, see Compatibility) |
+| 11 | SetCells | pat, track, row0, count (≤16), count × 4 cell bytes (count × 6 from a 0.3.0 editor is accepted) |
 | 12 | SetPatLen | pat, len |
 | 13 | SetDrum | voice, param, value |
 | 14 | SetCv | track (0–1), param, value |
-| 15 | SetMix | channel (0–5), param, value |
+| 15 | SetMix | channel (0–5), param (0–7), value |
 | 16 | SetMaster | param, value |
 | 17 | SetEntry | index, pattern, repeats |
 | 18 | SetSongLen | len |
@@ -91,11 +105,11 @@ so a buggy or malicious host cannot put the engine in a bad state.
 | 1A | SetSwing | percent |
 | 1B | SetName | 12 ASCII bytes |
 | 1C | SetZeroNote | note |
-| 1D | SetMacroMask | macro (0 = decay/Main, 1 = colour/X), **enabled**-voice bits 0–3 (v2) |
+| 1D | SetMacroMask | macro (0 = decay/Main, 1 = colour/X), **enabled**-voice bits 0–3 (v2) [, CV/IN bits 0–3 (v3, see `macro_cvin`)] |
 | 1F | SetHeader | 212 raw header bytes |
 | 20 | Transport | mode (0 stop, 1 song, 2 pattern), arg (entry or pattern) |
 | 21 | Cue | entry (song mode) or pattern (pattern mode); applied at the end of the current pattern |
-| 22 | Preview | track, note, vel (plays one note now) |
+| 22 | Preview | track (0–7), note, vel (plays one note now; IN: opens the VCA for 1/4 s in IN TRACK mode) |
 | 23 | NextPart | – (same as a tap on Z Down) |
 | 30 | Save | slot 0–5 → **Ack** when the flash write has finished |
 | 31 | Load | slot → **Ack**; the editor then sends GetSong |
@@ -111,10 +125,10 @@ pattern picks them up on the next row). Nothing is written to flash until
 | --- | --- | --- |
 | 41 | Info | protocol, fw major, minor, patch, tracks, drum tracks, patterns, rows, slots, entries, current slot, valid-slot bitmask |
 | 42 | SongHeader | 212 raw header bytes |
-| 43 | PatternChunk | pat, track, row0, count, count × 4 cell bytes |
+| 43 | PatternChunk | pat, track, row0, count, count × 4 cell bytes (fw 0.3.0: × 6; fw 0.2: × 4, tracks 0–5) |
 | 44 | DumpEnd | – |
 | 45 | Status | 28 bytes, see below |
-| 46 | Panel | 27 bytes, knob/macro feedback, see below (v2) |
+| 46 | Panel | 37 bytes (fw 0.2: 27), knob/macro feedback, see below |
 | 50 | Ack | op (30/31/32), status (0 ok, 1 empty slot, 2 busy, 3 error), slot |
 
 **Status payload**
@@ -129,7 +143,7 @@ pattern picks them up on the next row). Nothing is written to flash until
 | 9 | swing |
 | 10–12 | macros decay, colour, filter (+64) |
 | 13–14 | current CV notes |
-| 15 | gate bits |
+| 15 | gate bits: 1/2 = CV gate 1/2, 4/8 = IN1/IN2 VCA gate (v3) |
 | 16–17 | CPU % now / peak since last status (ProcessSample only) |
 | 18–25 | peak meters 0–127: channels 1–6, master L, R |
 | 26 | drum trigger bits since last status |
@@ -158,10 +172,18 @@ reads the status words core 0 publishes every 64 samples.
 | 22 | slot |
 | 23–25 | mode, song entry (part), pattern |
 | 26 | CV in 1 transpose in semitones (+64) |
+| 27–28 | (v3) CV/IN routing bits for Main and X (`macro_cvin`) |
+| 29–30 | (v3) **effective** gate length of CV 1–2 (1/16 row, with the Main macro if routed; 0 = tie) |
+| 31–32 | (v3) **effective** glide of CV 1–2 (with the X macro if routed) |
+| 33–34 | (v3) **effective** VCA decay of IN 1–2 (with the Main macro if routed) |
+| 35–36 | (v3) **effective** drive of IN 1–2 (with the X macro if routed) |
+
+Effective CV gate = gate + Main macro / 2, clamped 1–64; a tie (0) stays a tie.
 
 ### Macros are offsets
 
-The PERFORM macros (Main = decay, X = colour/param A, Y = master filter) are
+The PERFORM macros (Main = decay / CV gate length / IN VCA decay, X = colour /
+CV glide / IN drive, Y = master filter) are
 **live offsets** added when a drum is hit (filter: continuously). They are
 **never written into the song**, and saving a slot saves the song values without them.
 The editor draws the song value as the knob position (gold arc) and the
@@ -171,6 +193,36 @@ synced into the editor's song.
 
 ### Compatibility
 
+Protocol versions: 1 = fw 0.1, 2 = fw 0.2 (6 tracks, 4-byte cells), 3 = fw 0.3.0
+(8 tracks, 6-byte cells with a second effect), **4 = fw 0.3.1** (8 tracks,
+4-byte cells: the second effect was removed again because it did not fit the
+editor). Protocol 4 is 3 without the second effect; everything else (header,
+Status, Panel, SetMacroMask) is identical.
+
+* **Editor 0.3.1 + module 0.3.0 (protocol 3):** the editor sends the 6-byte cell
+  forms with the second effect set to 0, so no hidden second effect stays on the
+  module for a step you edit, and shows a banner recommending the update. A 0.3.0
+  dump (6-byte chunks) is converted on reading: the second effect is dropped, or
+  moved into the effect column if that one is empty.
+* **Editor 0.3.1 + module 0.2 (protocol 2):** the editor sends the 4-byte cell
+  forms for tracks 0–5 only, skips edits and previews of the IN tracks, sends
+  SetMacroMask without the CV/IN byte, and shows a banner. A 0.2 dump (4-byte
+  chunks, 6 tracks) is converted on reading: IN tracks empty, the IN VCAs on
+  AUTO, so they behave as before.
+* **Module 0.3.1 + editor 0.3.0:** the old editor sends 9-byte SetCell and
+  6-byte SetCells cells; the firmware accepts them with the same rule (second
+  effect dropped, or moved into an empty effect column). Its dump parser would
+  expect 6-byte chunks, so use the matching editor (`web/`) for reading songs.
+* **Module 0.3.1 + editor 0.2:** works for tracks 0–5 (4-byte cells are the
+  native form again).
+* **Flash:** 0.3.1 writes format 3 (4-byte cells, 32,996-byte record, 9 sectors)
+  at the **same slot addresses** as 0.3.0 (52 KB stride), so songs saved by 0.3.0
+  are still found and converted when loaded (`song_from_v030`: header unchanged,
+  second effect dropped or moved into an empty effect column). Slots saved by
+  0.1/0.2 stay where they are and are converted when loaded (`song_from_v2`:
+  CV/IN routing 0, IN VCAs on AUTO, IN hold 8). Saving writes the new format;
+  older records of that slot are then ignored.
+* Song files (`.wtrk.json`) from editor 0.1/0.2 (6 tracks) and 0.3.0 (6-byte cells) are converted on import.
 * The protocol version is the first byte of **Info**. The editor shows a banner
   for a v1 module ("knob feedback and voice routing need firmware 0.2") and keeps
   working: everything else in v2 is a superset of v1, and Status is unchanged.
@@ -188,7 +240,7 @@ editor                         card
   Hello  ───────────────────▶
          ◀─────────────────── Info
   GetSong ──────────────────▶
-         ◀─────────────────── SongHeader, PatternChunk × 384, DumpEnd
+         ◀─────────────────── SongHeader, PatternChunk × 512, DumpEnd
   Ping (every 500 ms) ──────▶
          ◀─────────────────── Status (every 50 ms)
          ◀─────────────────── Panel (on change, ≤ 30/s)
@@ -197,8 +249,8 @@ editor                         card
          ◀─────────────────── Ack(save, ok, n)
 ```
 
-A full upload ("Send to module") is SetHeader + 384 SetCells messages
-(≈28 KB). The editor pauses 8 ms after every 24 messages so the card's 256-byte
+A full upload ("Send to module") is SetHeader + 512 SetCells messages
+(512 × 73 bytes, ≈37 KB; fw 0.3.0: ≈53 KB, fw 0.2: 384 messages, ≈28 KB). The editor pauses 8 ms after every 24 messages so the card's 256-byte
 MIDI RX FIFO can drain; the card handles USB on core 1 and never blocks audio.
 
 ## Firmware side
@@ -210,7 +262,8 @@ MIDI RX FIFO can drain; the card handles USB on core 1 and never blocks audio.
 * Load/Init build the new song in a **spare buffer** and hand it to core 0
   through a lock-free SPSC queue. Core 0 swaps the pointer between samples.
 * Save snapshots the live song into the spare buffer, then erases and programs a
-  28 KB slot one 4 KB sector at a time with interrupts disabled **only on
+  slot one 4 KB sector at a time (9 sectors = 36 KB per save; the slots are
+  52 KB apart, as in 0.3.0, so older records can still be read) with interrupts disabled **only on
   core 1**. The binary is built `copy_to_ram`, so core 0 never reads XIP flash
   and the audio keeps running during the write. Each record starts with a 16-byte
   header (`'WTRK'`, version, size, CRC-32, ~CRC). The CRC covers the whole song,
