@@ -35,6 +35,7 @@
 <section class="toolbar">
   <div class="group">
     <label>SONG <input id="songName" maxlength="12" size="12"></label>
+    <span id="slotNow" class="pill slotnow" title="The slot the module is playing (follows the slot knob on the module)"><i class="led"></i><span>SLOT –</span></span>
     <label>SLOT <select id="slot"></select></label>
     <button id="btnLoad" title="Load the slot on the module and read it into the editor">Load</button>
     <button id="btnSave" title="Save the module's song into the slot (flash)">Save to module</button>
@@ -53,6 +54,7 @@
     <label title="Step jump: how many rows the cursor moves after you enter a note or value (0 = stay on the row)">STEP JUMP <select id="step"></select></label>
     <label><input id="editMode" type="checkbox" checked> EDIT</label>
     <label><input id="follow" type="checkbox" checked> FOLLOW</label>
+    <button id="btnKbd" title="Show / hide the keyboard sketch under the grid (which key plays which note)">⌨</button>
     <button id="btnHelp">Keys</button>
   </div>
 </section>
@@ -85,6 +87,12 @@
 
   <section class="center">
     <div id="grid" class="grid" tabindex="0" aria-label="Pattern editor"></div>
+    <div id="kbd" class="kbd" hidden>
+      <div class="kbd-head"><span class="kbd-name">KEYS</span><span id="kbdTitle"></span>
+        <button id="kbdLayout" title="Printed layout of your keyboard (QWERTY / QWERTZ). The keys work by position either way.">QWERTY</button>
+        <button id="kbdClose" title="Hide (the ⌨ button shows it again)">×</button></div>
+      <div id="kbdKeys"></div>
+    </div>
   </section>
 
   <aside class="right">
@@ -116,12 +124,12 @@
   <table>
     <tr><td>Arrows, PgUp/PgDn, Home/End</td><td>move</td></tr>
     <tr><td>Tab / Shift+Tab</td><td>next / previous track</td></tr>
-    <tr><td>Z S X D C V G B H N J M , L .</td><td>notes (lower octave)</td></tr>
-    <tr><td>Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P</td><td>notes (upper octave)</td></tr>
+    <tr><td colspan="2"><div id="kbdHelp" class="kbd-help"></div></td></tr>
+    <tr><td>Bottom rows / top rows</td><td>notes: lower octave (Z/Y row + S D G H J row) and upper octave (Q row + digits)</td></tr>
     <tr><td>1</td><td>OFF (CV: gate off, drum: choke, IN: close VCA)</td></tr>
-    <tr><td>0-9</td><td>values 00-99 in the VEL and effect value columns: one digit = 0-9, a second one makes two digits (7 5 = 75)</td></tr>
+    <tr><td>0-9</td><td>values 00-99 in the VEL / LVL and effect value columns: one digit = 0-9, a second one makes two digits (7 5 = 75)</td></tr>
     <tr><td>Shift+↑ / ↓, Shift+PgUp / PgDn</td><td>value ±1 / ±10 (note column: semitone / octave)</td></tr>
-    <tr><td>Enter or click on FX</td><td>list of effects for this track (or type the letter: A B D G S R P K)</td></tr>
+    <tr><td>Enter or click on FX</td><td>list of effects for this track (or type the letter: A B D G S R P K W)</td></tr>
     <tr><td>Delete / Backspace</td><td>clear field (whole cell in the note column)</td></tr>
     <tr><td>- / =</td><td>octave down / up</td></tr>
     <tr><td>Space</td><td>play pattern / stop</td></tr>
@@ -135,7 +143,8 @@
     <tr><td>Double-click / Delete</td><td>back to default</td></tr>
     <tr><td>Arrows, PgUp/PgDn, Home/End</td><td>keyboard control when focused</td></tr>
   </table>
-  <p class="dim">Keys follow the physical US layout, so on a German keyboard the bottom row starts at Y.
+  <p class="dim">Keys work by position, so on a German (QWERTZ) keyboard the bottom row starts at Y; the sketch shows your letters.
+  CV tracks have no VEL column (a gate is on or off) and play C0–B5 = 0–5.92 V, so the octave stops at 5 there.
   Gold arc = value stored in the song. Red arc and dot = what the module plays right now with its PERFORM
   macros (Main = decay / CV gate length / IN VCA decay, X = colour / glide / IN drive, Y + CV&nbsp;in&nbsp;2 = filter). Macros are offsets and are never saved.</p>
   <form method="dialog"><button>Close</button></form>

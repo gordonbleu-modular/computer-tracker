@@ -4,9 +4,12 @@ import {
   K, Song, msg, decode, DumpCollector, uploadMessages, demoSong, noteName, clamp,
   ENGINES, MATERIALS, FX, FX_BY_CODE, fxFor, fxShow, fxStore, velShow, velStore, trackKind,
   VCA_SRC, VCA_SRC_NAMES, NOTE_OFF, NOTE_EMPTY, PROTOCOL_VERSION, effectiveDrum, effectiveFilter, effectiveCv, effectiveIn,
+  cvFold, cvVolts, CV_NOTE_MIN, CV_NOTE_MAX, CV_OCT_MAX, RV, RV_DEFAULTS, rvSeconds,
 } from './protocol.js';
 import { Device } from './midi.js';
 import { Knob } from './knob.js';
+import { MeterBallistics } from './meter.js';
+import { NOTE_KEYS, renderKeyboard, detectLayout } from './keyboard.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -26,6 +29,9 @@ const state = {
   clipTrack: null, clipPattern: null,
   dump: new DumpCollector(), dumping: false,
   panel: null, panelAt: 0, legacy: false,
+  dirty: false,      // edits since the song was read from / saved to the module
+  ownSwapAt: -1e9,   // when the editor itself asked the module to load / init a song
+  liveMute: { reverb: false, master: false, at: -1e9 }, // v7 live mutes (not in the song)
 };
 const dev = new Device();
 let pingTimer = null;
@@ -50,13 +56,17 @@ function toast(text, ms = 3500) {
 
 // Send to the module if connected. Model edits always happen locally first.
 function send(bytes) { if (dev.connected) dev.send(bytes); }
-function changed() { saveLocal(); }
+function changed() { saveLocal(); if (!state.dirty) { state.dirty = true; paintSlotNow(); } }
+// Changes that came from the module itself (tempo / swing knobs, routing): saved in the browser, not "edits".
+function synced() { saveLocal(); }
 
 // ------------------------------------------------------------------ grid ---
-// Columns per track: NOTE (3) VEL (2) FX (letter + 2).
+// Columns per track: NOTE (3) VEL (2) FX (letter + 2). CV/gate tracks: NOTE FX
+// (a gate is only on/off: no velocity since 0.3.2; the VEL span is hidden).
 // Values are decimal 00-99 (0-127 inside, see fxShow / velShow).
 const pad2 = (n) => String(n).padStart(2, '0');
-const SUB_LABELS = { drum: ['NOTE', 'VEL', 'FX'], cv: ['NOTE', 'VEL', 'FX'], in: ['TRIG', 'LVL', 'FX'] };
+const SUB_LABELS = { drum: ['NOTE', 'VEL', 'FX'], cv: ['NOTE', '', 'FX'], in: ['TRIG', 'LVL', 'FX'] };
+const hasVel = (t) => trackKind(t) !== 'cv';
 const SRC_SHORT = ['', 'OPEN', 'CV', 'TRACK'];
 let rowEls = [];
 let headHits = [];
@@ -95,8 +105,9 @@ function buildGrid() {
     const L = SUB_LABELS[kind];
     const labs = [el('span', 'l n'), el('span', 'l v'), el('span', 'l x')];
     labs.forEach((x, i) => { x.appendChild(el('i', null, L[i])); sub.appendChild(x); });
-    labs[0].title = kind === 'in' ? 'Trigger: any note key opens the VCA, 1 = OFF closes it' : 'Note: keys Z…M / Q…P, 1 = OFF';
-    labs[1].title = kind === 'drum' ? 'Velocity 01-99 (.. = default)' : kind === 'cv' ? 'Velocity = level of the IN VCA that follows this gate' : 'Level of the VCA 01-99 (.. = full)';
+    labs[0].title = kind === 'in' ? 'Trigger: any note key opens the VCA, 1 = OFF closes it'
+      : kind === 'cv' ? 'Note C0-B5 = 0-5.92 V (1 V/oct, C0 = 0 V); 1 = OFF closes the gate' : 'Note: keys Z…M / Q…P, 1 = OFF';
+    labs[1].title = kind === 'drum' ? 'Velocity 01-99 (.. = default)' : 'Level of the VCA 01-99 (.. = full)';
     labs[2].title = 'Effect: letter + value. Enter or click = list of effects';
     subLabelEls.push(labs);
     h.append(top, sub);
@@ -141,14 +152,7 @@ function fitGrid() {
   }
 }
 
-function paintSubLabels() {
-  // CV velocity only matters while the matching IN VCA follows that gate.
-  subLabelEls.forEach((labs, t) => {
-    if (trackKind(t) !== 'cv') return;
-    const i = t - K.firstCv;
-    labs[1].classList.toggle('nv', state.song.vcaSource(i) !== VCA_SRC.cvGate);
-  });
-}
+function paintSubLabels() {}
 
 function fxText(code, v) {
   if (!code) return ['.', '..'];
@@ -166,7 +170,6 @@ function paintCell(r, t) {
   const vs = velShow(c.vel);
   v.textContent = vs < 0 ? '..' : pad2(vs);
   v.classList.toggle('e', !c.vel);
-  v.classList.toggle('nv', kind === 'cv' && state.song.vcaSource(t - K.firstCv) !== VCA_SRC.cvGate);
   const [a1, b1] = fxText(c.fx, c.fxv);
   x1.textContent = a1; v1.textContent = b1;
   x1.classList.toggle('e', !c.fx); v1.classList.toggle('e', !c.fx);
@@ -191,6 +194,8 @@ function paintCursor(scroll) {
   showFxHelp();
   showStatusLine();
   selectVoicePanel(state.track);
+  paintOctave();
+  paintKeyboard();
 }
 
 function paintPlayhead() {
@@ -230,15 +235,15 @@ function describeField(r, t, sub) {
   const where = `${trackTitle(t)} · row ${pad2(r + 1)} · `;
   if (sub === 0) {
     if (kind === 'in') return where + (c.note === NOTE_OFF ? 'OFF: closes the VCA' : c.note ? 'TRIG: opens the VCA for the hold time (IN module)' : 'TRIG: any note key opens the VCA, 1 = OFF');
-    return where + `NOTE ${noteName(c.note)}` + (kind === 'drum' ? ' · 1 = OFF chokes the voice' : ' · 1 = OFF closes the gate');
+    if (kind === 'cv') return where + (c.note && c.note !== NOTE_OFF ? `NOTE ${noteName(c.note)} = ${cvVolts(c.note).toFixed(2)} V` : `NOTE ${noteName(c.note)}`) +
+      ' · C0 = 0 V, 1 V/oct, range C0-B5 · gate on/off, 1 = OFF closes it';
+    return where + `NOTE ${noteName(c.note)} · 1 = OFF chokes the voice`;
   }
   if (sub === 1) {
     const vs = velShow(c.vel);
     const val = vs < 0 ? '.. (default)' : pad2(vs);
     if (kind === 'drum') return where + `VEL ${val}: how hard the voice is hit (.. = 79)`;
-    if (kind === 'in') return where + `LVL ${val}: VCA level for this trigger (.. = full)`;
-    const i = t - K.firstCv;
-    return where + `VEL ${val}: level of the IN${i + 1} VCA` + (state.song.vcaSource(i) === VCA_SRC.cvGate ? '' : ` (no effect: IN${i + 1} does not follow CV${i + 1}, see the CV / IN tab)`);
+    return where + `LVL ${val}: VCA level for this trigger (.. = full)`;
   }
   const f = FX_BY_CODE[c.fx];
   if (!f) return where + `FX empty · Enter or click for the list, or type ${fxFor(t).map(([l]) => l).join(' ')}`;
@@ -351,19 +356,53 @@ function moveCursor(dr, dt, ds) {
   if (dt) { state.track = clamp(state.track + dt, 0, K.tracks - 1); }
   if (ds) {
     let s = state.sub + ds, t = state.track;
+    if (s === 1 && !hasVel(t)) s += ds;   // CV tracks: no VEL column
     if (s > 3) { if (t < K.tracks - 1) { t++; s = 0; } else s = 3; }
     if (s < 0) { if (t > 0) { t--; s = 3; } else s = 0; }
     state.sub = s; state.track = t;
   }
+  if (state.sub === 1 && !hasVel(state.track)) state.sub = 2;
   paintCursor(true);
 }
 
-const NOTE_KEYS = {
-  KeyZ: 0, KeyS: 1, KeyX: 2, KeyD: 3, KeyC: 4, KeyV: 5, KeyG: 6, KeyB: 7, KeyH: 8, KeyN: 9, KeyJ: 10, KeyM: 11,
-  Comma: 12, KeyL: 13, Period: 14,
-  KeyQ: 12, Digit2: 13, KeyW: 14, Digit3: 15, KeyE: 16, KeyR: 17, Digit5: 18, KeyT: 19, Digit6: 20, KeyY: 21, Digit7: 22, KeyU: 23,
-  KeyI: 24, Digit9: 25, KeyO: 26, Digit0: 27, KeyP: 28,
-};
+// ------------------------------------------------------- keyboard sketch ---
+// Which computer key plays which note (keyboard.js). Docked under the grid
+// (toggle with the ⌨ button) and drawn in the Keys dialog.
+const KB_KEY = 'workshopTracker.kbd';
+const kb = { layout: 'qwerty', map: null, sig: '' };
+const noteShort = (n) => noteName(n).replace('-', '');
+function keyboardTitle(t) {
+  const kind = trackKind(t), o = keyOctave(t);
+  if (kind === 'in') return `${trackTitle(t)} · any note key = TRIG, 1 = OFF`;
+  return `${trackTitle(t)} · OCT ${o}` + (kind === 'cv' ? ` · C${o} = ${o} V (CV: C0–B5 only)` : '') + ' · - / = octave';
+}
+function paintKeyboard(force) {
+  const t = state.track;
+  const sig = `${trackKind(t)}|${keyOctave(t)}|${kb.layout}|${t}|${trackTitle(t)}`;
+  if (!force && sig === kb.sig) return;
+  kb.sig = sig;
+  const opts = {
+    layout: kb.layout, layoutMap: kb.map,
+    noteText: (code) => (trackKind(t) === 'in' ? 'TRG' : noteShort(keyNote(code, t))),
+  };
+  const dock = $('kbd');
+  if (dock && !dock.hidden) { renderKeyboard($('kbdKeys'), opts); $('kbdTitle').textContent = keyboardTitle(t); }
+  if ($('help').open) renderKeyboard($('kbdHelp'), { ...opts, title: keyboardTitle(t) });
+  $('kbdLayout').textContent = kb.map ? 'auto' : kb.layout.toUpperCase();
+}
+function showKeyboard(on) {
+  $('kbd').hidden = !on;
+  $('btnKbd').classList.toggle('kbon', on);
+  try { localStorage.setItem(KB_KEY, on ? '1' : '0'); } catch {}
+  paintKeyboard(true);
+  fitGrid();
+}
+function pressKey(code) {
+  const k = document.querySelector(`#kbdKeys .kb-key[data-code="${code}"]`);
+  if (!k) return;
+  k.classList.add('press');
+  setTimeout(() => k.classList.remove('press'), 160);
+}
 
 // Shown value of the field under the cursor, and how to store a new one.
 function fieldValue(c, sub) {
@@ -386,7 +425,8 @@ function onGridKey(e) {
     const d = (k === 'ArrowUp' ? 1 : k === 'ArrowDown' ? -1 : k === 'PageUp' ? 10 : -10);
     e.preventDefault();
     if (state.sub === 0) {
-      if (c.note && c.note !== NOTE_OFF) setCell(state.row, state.track, { ...c, note: clamp(c.note + (Math.abs(d) === 10 ? Math.sign(d) * 12 : d), 1, 126) });
+      const [lo, hi] = trackKind(state.track) === 'cv' ? [CV_NOTE_MIN, CV_NOTE_MAX] : [1, 126];
+      if (c.note && c.note !== NOTE_OFF) setCell(state.row, state.track, { ...c, note: clamp(c.note + (Math.abs(d) === 10 ? Math.sign(d) * 12 : d), lo, hi) });
       return;
     }
     if (state.sub === 2) return;
@@ -411,13 +451,13 @@ function onGridKey(e) {
       else send(msg.playSong(0));
       e.preventDefault();
       return;
-    case 'Minus': if (state.sub === 0) { setOctave(state.octave - 1); e.preventDefault(); } return;
+    case 'Minus': if (state.sub === 0) { setOctave(keyOctave(state.track) - 1); e.preventDefault(); } return;
     case 'Equal': if (state.sub === 0) { setOctave(state.octave + 1); e.preventDefault(); } return;
     default: break;
   }
   if (k === 'Delete' || k === 'Backspace') {
     if (state.sub === 0) setCell(state.row, state.track, { note: 0, vel: 0, fx: 0, fxv: 0 }, false);
-    else if (state.sub === 1) setCell(state.row, state.track, { ...c, vel: 0 }, false);
+    else if (state.sub === 1) setCell(state.row, state.track, { ...c, vel: 0 }, false);   // (not on CV tracks)
     else setCell(state.row, state.track, { ...c, fx: 0, fxv: 0 }, false);
     if (state.edit) moveCursor(state.step, 0, 0);
     e.preventDefault();
@@ -426,9 +466,10 @@ function onGridKey(e) {
   if (state.sub === 0) {
     let note = null;
     if (k === 'Digit1') note = NOTE_OFF;
-    else if (k in NOTE_KEYS) note = clamp((state.octave + 1) * 12 + NOTE_KEYS[k], 1, 126);
+    else if (k in NOTE_KEYS) note = keyNote(k, state.track);
     if (note == null) return;
     e.preventDefault();
+    pressKey(k);
     if (e.repeat) return;
     if (!state.edit) { if (note !== NOTE_OFF && !fwLacks(state.track)) send(msg.preview(state.track, note, 100)); return; }
     setCell(state.row, state.track, { ...c, note });
@@ -496,7 +537,25 @@ function togglePlayPattern() {
   if (!dev.connected) toast('Not connected: connect the module to hear it');
 }
 
-function setOctave(o) { state.octave = clamp(o, 0, 8); $('octave').value = state.octave; }
+function setOctave(o) { state.octave = clamp(o, 0, 8); paintOctave(); paintKeyboard(); }
+// Octave the note keys play on track t: CV tracks stop at 5 (C0 = 0 V ... B5 = 5.92 V).
+const keyOctave = (t) => (trackKind(t) === 'cv' ? Math.min(state.octave, CV_OCT_MAX) : state.octave);
+function keyNote(code, t) {
+  const n = (keyOctave(t) + 1) * 12 + NOTE_KEYS[code];
+  return trackKind(t) === 'cv' ? cvFold(n) : clamp(n, 1, 126);
+}
+// The OCT selector shows the octave in effect for the track under the cursor.
+let octCv = null;
+function paintOctave() {
+  const sel = $('octave');
+  const cv = trackKind(state.track) === 'cv';
+  if (cv !== octCv) {
+    octCv = cv;
+    [...sel.options].forEach((o) => { o.disabled = cv && +o.value > CV_OCT_MAX; });
+    sel.title = cv ? 'Octave for note keys. CV tracks: 0-5 (C0 = 0 V, B5 = 5.92 V; only positive voltages).' : 'Octave for note keys (- / = keys)';
+  }
+  sel.value = keyOctave(state.track);
+}
 
 // ----------------------------------------------------------- arrangement ---
 function buildArrangement() {
@@ -543,9 +602,14 @@ const fmtTone = (v) => (v < 60 ? `LP${60 - v}` : v > 68 ? `HP${v - 68}` : 'flat'
 const fmtFilter = (v) => (v < 61 ? `LP${61 - v}` : v > 67 ? `HP${v - 67}` : 'off');
 const fmtA = (eng) => (v) => (eng === 4 ? MATERIALS[v >> 4].slice(0, 8) : eng === 3 ? `r${v >> 3}` : String(v));
 const fmtMacro = (v) => (v > 0 ? '+' : '') + v;
+const fmtPct = (v) => `${Math.round((v * 100) / 127)}%`;
+const fmtRvDecay = (v) => { const t = rvSeconds(v); return t < 1 ? `${Math.round(t * 1000)}ms` : `${t.toFixed(1)}s`; };
+const fmtLofi = (v) => (v === 0 ? 'clean' : `${16 - (v >> 4)}b${v >= 64 ? ' S&H' : ''}`);
+let rvLed = null;
+let liveMuteBtns = {}; // 'reverb' / 'master' -> button (0.4.2)
 
 // knobs.drum[v][param], knobs.cv[t][param], knobs.mix[ch][param], knobs.master[param]
-const knobs = { drum: [], cv: [], inm: [], mix: [], master: [] };
+const knobs = { drum: [], cv: [], inm: [], mix: [], master: [], send: [], rv: [] };
 let voicePanels = [];
 let voiceLeds = [];
 let gateLeds = [];
@@ -572,13 +636,25 @@ function jacks(names) {
 }
 function krow(...ks) { const r = el('div', 'krow'); ks.forEach((k) => r.appendChild(k.el)); return r; }
 
+// 0.4.2: each drum module wears a faceplate after the selected engine (look
+// only; knobs, layout and behaviour are the same for every engine).
+const PANEL_STYLES = ['p-kick', 'p-pluck', 'p-noise', 'p-metal', 'p-modal', 'p-snare'];
+const PLATE_NAMES = ['KICK', 'pluck', 'noise', 'Metal', 'MODAL', 'SNARE/CLAP'];
+function setPanelStyle(m, e) {
+  m.classList.remove(...PANEL_STYLES);
+  m.classList.add(PANEL_STYLES[e] || PANEL_STYLES[0]);
+  if (m.plate) m.plate.textContent = PLATE_NAMES[e] || '';
+}
+
 function buildVoices() {
   const box = $('voices');
   box.innerHTML = '';
   voicePanels = []; voiceLeds = []; routeBtns = []; knobs.drum = [];
   const s = state.song;
   for (let v = 0; v < K.drumTracks; v++) {
-    const m = moduleEl(`DRUM ${v + 1}`);
+    const m = moduleEl(`DRUM ${v + 1}`, 'drum');
+    m.plate = el('div', 'plate');
+    setPanelStyle(m, s.drum(v, 0));
     voiceLeds.push(m.led);
     const set = (param) => (x) => { s.setDrum(v, param, x); send(msg.setDrum(v, param, x)); changed(); paintMods(); };
     const eng = el('select', 'engine');
@@ -614,6 +690,7 @@ function buildVoices() {
       const e = +eng.value;
       set(0)(e);
       sub.textContent = ENGINES[e].info;
+      setPanelStyle(m, e);
       ka.setLabel(ENGINES[e].a); ka.setFmt(fmtA(e));
       kb.setLabel(ENGINES[e].b);
       buildGrid();
@@ -621,7 +698,7 @@ function buildVoices() {
     const aud = el('button', 'audition', 'TRIG');
     aud.title = 'Play this voice on the module';
     aud.onclick = () => send(msg.preview(v, 48, 110));
-    m.append(eng, sub, routes, kd.el, krow(ka, kb), krow(kt, kv), el('div', 'spacer'), aud, jacks(['TRIG', 'OUT']));
+    m.append(eng, sub, routes, kd.el, krow(ka, kb), krow(kt, kv), el('div', 'spacer'), aud, m.plate);
     box.appendChild(m);
     voicePanels.push(m);
   }
@@ -692,9 +769,17 @@ function buildCvIn() {
     voicePanels[K.firstCv + c] = m;
   }
   const g = moduleEl('CV RANGE', 'voice-cv narrow');
-  const kz = new Knob({ label: '0 V note', min: 0, max: 96, value: s.cvZero, def: 36, size: 'l', fmt: (v) => noteName(v), onChange: (x) => { s.cvZero = x; send(msg.setZeroNote(x)); changed(); } });
-  knobs.cvZero = kz;
-  g.append(el('div', 'msub', '1 V/oct, 0…+6 V'), kz.el, el('div', 'msub', 'This note = 0 V. Lower notes stay at 0 V.'), el('div', 'spacer'), jacks(['CV1', 'CV2']));
+  // 0.3.2: fixed mapping, only positive voltages (the Workshop System VCOs need >= 0 V).
+  const scale = el('div', 'cvscale');
+  for (let o = CV_OCT_MAX; o >= 0; o--) {
+    const row = el('div', 'cvrow');
+    row.append(el('b', null, `C${o}`), el('span', null, `${o}.00 V`));
+    scale.appendChild(row);
+  }
+  scale.title = 'Note names on CV tracks match the voltage: C0 = 0 V, C1 = 1 V … B5 = 5.92 V.';
+  g.append(el('div', 'msub', '1 V/oct · C0 = 0 V'), scale,
+    el('div', 'msub', 'Notes C0–B5. Transp and CV in 1 fold out-of-range notes by an octave, so the output never goes negative.'),
+    el('div', 'spacer'), jacks(['CV1', 'CV2']));
   box.appendChild(g);
   for (let i = 0; i < K.inTracks; i++) {
     const ch = 4 + i;
@@ -703,7 +788,7 @@ function buildCvIn() {
     const old = dev.connected && state.proto < 3;
     const set = (param) => (x) => { setMixParam(ch, param, x); paintMods(); syncInKnobs(); };
     const src = el('select', 'engine');
-    src.title = `What opens the VCA of audio in ${i + 1}. CV GATE: the CV/gate ${i + 1} track, its velocity sets the level. IN TRACK: the IN${i + 1} track (TRIG + LVL).`;
+    src.title = `What opens the VCA of audio in ${i + 1}. CV GATE: the gate of CV/gate track ${i + 1} opens it (full level; the mixer sets the volume). IN TRACK: the IN${i + 1} track (TRIG + LVL).`;
     const opts = [[VCA_SRC.open, 'OPEN (always on)'], [VCA_SRC.cvGate, `CV GATE ${i + 1}`], [VCA_SRC.inTrack, `IN${i + 1} TRACK`]];
     if (s.mix(ch, 6) === VCA_SRC.auto) opts.unshift([VCA_SRC.auto, s.mix(ch, 4) ? `AUTO (= CV GATE ${i + 1})` : 'AUTO (= OPEN)']);
     for (const [v, n] of opts) { const o = el('option', null, n); o.value = v; src.appendChild(o); }
@@ -745,17 +830,44 @@ function syncInKnobs() {
 function selectVoicePanel(t) { voicePanels.forEach((p, i) => p && p.classList.toggle('sel', i === t)); }
 
 // ----------------------------------------------------------------- mixer ---
+// Meters: bar + peak-hold marker per channel (6 channels, master L, R), with
+// PPM/VU-like ballistics animated between the module's 50 ms reports (meter.js).
 let meters = [];
+const meterBal = Array.from({ length: 9 }, () => new MeterBallistics()); // 6 ch, master L/R, reverb return
+function meterEl() {
+  const met = el('div', 'meter');
+  const bar = el('i'), pk = el('b', 'pk');
+  met.append(bar, pk);
+  met.title = 'Level (dB scale, -48…0 dBFS). White line = peak of the last second.';
+  meters.push({ bar, pk });
+  return met;
+}
+let meterLast = 0;
+function animateMeters(now) {
+  const dt = meterLast ? Math.min(100, now - meterLast) : 16;
+  meterLast = now;
+  meterBal.forEach((m, i) => {
+    m.step(dt);
+    const e = meters[i];
+    if (!e) return;
+    e.bar.style.clipPath = `inset(${((1 - m.value) * 100).toFixed(1)}% 0 0 0)`;
+    e.pk.style.bottom = `${(m.peak * 100).toFixed(1)}%`;
+    e.pk.style.opacity = m.peak > 0.01 ? '1' : '0';
+  });
+  requestAnimationFrame(animateMeters);
+}
 let muteBtns = [];
 function buildMixer() {
   const box = $('mixer');
   box.innerHTML = '';
-  meters = []; muteBtns = []; knobs.mix = [];
+  meters = []; muteBtns = []; liveMuteBtns = {}; knobs.mix = []; knobs.send = []; knobs.rv = [];
   const s = state.song;
+  const noRv = dev.connected && state.proto < 6; // reverb needs firmware 0.4 (protocol 6)
+  const setSend = (ch) => (x) => { s.setSend(ch, x); send(msg.setSend(ch, x)); changed(); };
   for (let ch = 0; ch < K.channels; ch++) {
     const isIn = ch >= K.drumTracks;
     const m = moduleEl(CH_NAMES[ch], 'strip' + (isIn ? ' in' : ''));
-    const met = el('div', 'meter'); const bar = el('i'); met.appendChild(bar); meters.push(bar);
+    const met = meterEl();
     const set = (param) => (x) => { s.setMix(ch, param, x); send(msg.setMix(ch, param, x)); changed(); };
     const k = [
       new Knob({ label: 'Level', value: s.mix(ch, 0), def: 110, onChange: set(0) }),
@@ -774,6 +886,12 @@ function buildMixer() {
       m.appendChild(vca.el);
       m.title = `IN${i + 1} = audio input ${i + 1} (e.g. a VCO). Its VCA is set up on the CV / IN tab.`;
     }
+    const snd = new Knob({ label: 'Send', value: s.send(ch), def: 0, size: 's', fmt: fmtPct, onChange: setSend(ch),
+      title: `Reverb send of ${CH_NAMES[ch]} (post level and mute). Square law: 50 % ≈ -12 dB, 100 % = full.` });
+    snd.el.classList.add('send');
+    snd.setDisabled(noRv);
+    knobs.send[ch] = snd;
+    m.appendChild(snd.el);
     const mute = el('button', 'mute');
     mute.append(el('i', 'led'), document.createTextNode('MUTE'));
     mute.onclick = () => { const v = s.mix(ch, 5) >= 64 ? 0 : 127; set(5)(v); paintMutes(); };
@@ -781,9 +899,28 @@ function buildMixer() {
     m.append(el('div', 'spacer'), mute);
     box.appendChild(m);
   }
+  // Lo-fi reverb (firmware 0.4): returns into the master bus before the filter.
+  const rv = moduleEl('REVERB', 'strip reverb');
+  rvLed = rv.led;
+  const setR = (i) => (x) => { s.setMaster(RV.return + i, x); send(msg.setMaster(RV.return + i, x)); changed(); };
+  const rvm = el('div', 'meters');
+  rvm.appendChild(meterEl());
+  knobs.rv = [
+    new Knob({ label: 'Return', value: s.master(RV.return), def: RV_DEFAULTS[0], fmt: fmtPct, onChange: setR(0), title: 'Reverb return level into the master (90 ≈ 0 dB, 100 % = +6 dB).' }),
+    new Knob({ label: 'Size', value: s.master(RV.size), def: RV_DEFAULTS[1], size: 's', fmt: fmtPct, onChange: setR(1), title: 'Room size: delay line lengths 40…100 % (changes glide like a tape bend).' }),
+    new Knob({ label: 'Decay', value: s.master(RV.decay), def: RV_DEFAULTS[2], size: 's', fmt: fmtRvDecay, onChange: setR(2), title: 'Decay time to -60 dB (0.3 … 9 s).' }),
+    new Knob({ label: 'Tone', value: s.master(RV.tone), def: RV_DEFAULTS[3], size: 's', fmt: fmtPct, onChange: setR(3), title: 'Damping inside the tail: low = dark, high = bright.' }),
+    new Knob({ label: 'Lo-fi', value: s.master(RV.lofi), def: RV_DEFAULTS[4], size: 's', fmt: fmtLofi, onChange: setR(4),
+      title: 'Grit: drops low bits in the tail (16 → 9 bit), adds a slow pitch wobble, and from 50 % on uses sample-and-hold (aliased) output.' }),
+  ];
+  knobs.rv.forEach((k) => k.setDisabled(noRv));
+  rv.append(rvm, ...knobs.rv.map((x) => x.el), el('div', 'spacer'), liveMuteBtn('reverb'));
+  rv.title = noRv ? 'The reverb needs firmware 0.4.0 (protocol 6). Update the module.' : 'Lo-fi stereo reverb, 16 kHz, 4-line FDN. LED = tail is ringing.';
+  if (noRv) rv.classList.add('off');
+  box.appendChild(rv);
   const ms = moduleEl('MASTER', 'strip master');
   const mm = el('div', 'meters');
-  for (let i = 0; i < 2; i++) { const met = el('div', 'meter'); const bar = el('i'); met.appendChild(bar); meters.push(bar); mm.appendChild(met); }
+  for (let i = 0; i < 2; i++) mm.appendChild(meterEl());
   const setM = (param) => (x) => { s.setMaster(param, x); send(msg.setMaster(param, x)); changed(); paintMods(); };
   knobs.master = [
     new Knob({ label: 'Level', value: s.master(0), def: 120, onChange: setM(0) }),
@@ -791,13 +928,44 @@ function buildMixer() {
     new Knob({ label: 'Filter', value: s.master(2), def: 64, fmt: fmtFilter, size: 'l', bipolar: true, onChange: setM(2),
       title: 'Master filter: left = low-pass, centre = off, right = high-pass. The module\'s Y knob and CV in 2 add to it (red).' }),
   ];
-  ms.append(mm, ...knobs.master.map((x) => x.el), el('div', 'spacer'), jacks(['L', 'R']));
+  ms.append(mm, ...knobs.master.map((x) => x.el), el('div', 'spacer'), liveMuteBtn('master'));
   box.appendChild(ms);
+  // meters[] order = meterBal order: 6 channels, master L, R, then the reverb return.
+  meters.push(meters.splice(K.channels, 1)[0]);
   paintMutes();
   paintMods();
 }
+// REVERB / MASTER mutes (firmware 0.4.2, protocol 7): live only, like a mixing
+// desk's return / main mute. Not stored in the song; the module starts unmuted.
+// The module's Status flags are the truth while connected.
+const liveMuteOk = () => !dev.connected || state.proto >= 7;
+function liveMuteBtn(which) {
+  const b = el('button', 'mute');
+  b.append(el('i', 'led'), document.createTextNode('MUTE'));
+  b.onclick = () => {
+    if (!liveMuteOk()) return;
+    const on = !state.liveMute[which];
+    state.liveMute[which] = on;
+    state.liveMute.at = performance.now();
+    send(msg.setLiveMute(which, on));
+    paintMutes();
+  };
+  liveMuteBtns[which] = b;
+  return b;
+}
 function paintMutes() {
-  muteBtns.forEach((b, ch) => { const on = state.song.mix(ch, 5) >= 64; b.classList.toggle('on', on); b.querySelector('.led').classList.toggle('lit', on); b.setAttribute('aria-pressed', String(on)); });
+  const paint = (b, on) => { b.classList.toggle('on', on); b.querySelector('.led').classList.toggle('lit', on); b.setAttribute('aria-pressed', String(on)); };
+  muteBtns.forEach((b, ch) => paint(b, state.song.mix(ch, 5) >= 64));
+  const ok = liveMuteOk();
+  for (const w of ['reverb', 'master']) {
+    const b = liveMuteBtns[w];
+    if (!b) continue;
+    paint(b, ok && state.liveMute[w]);
+    b.disabled = !ok;
+    b.title = !ok ? 'Needs firmware 0.4.2 (protocol 7). Update the module.'
+      : w === 'master' ? 'Mute the whole output (~5 ms fade). Live only: not saved with the song, off after power-up.'
+      : 'Mute the reverb return (~5 ms fade; the tail keeps running, so unmuting brings back what still rings). Live only: not saved.';
+  }
 }
 
 // Red "live" arcs: the module's PERFORM macros as offsets on the song values.
@@ -949,12 +1117,16 @@ function onMessage(data) {
         buildCvIn(); buildMixer(); buildGrid();
       }
       state.dump.tracksExpected = state.proto < 3 ? K.v2Tracks : K.tracks;
-      if (m.protocol === 3) {
+      if (m.protocol === 4) {
+        banner(`The module runs firmware ${m.firmware}. Everything works from here (the editor sets C0 = 0 V and converts the CV notes), ` +
+          `but please flash the new workshop_tracker.uf2 (0.3.2): the slot knob then splits its travel over the saved slots, CV GATE ` +
+          `ignores velocity and CV in 1 can no longer transpose below 0 V.`);
+      } else if (m.protocol === 3) {
         banner(`The module runs firmware ${m.firmware}, which still has a second effect column. Everything works from here (the second ` +
-          `effect is cleared when you edit a step), but please flash the new workshop_tracker.uf2 (0.3.1). Its songs and slots are converted.`);
+          `effect is cleared when you edit a step), but please flash the new workshop_tracker.uf2 (0.3.2). Its songs and slots are converted.`);
       } else if (m.protocol < 3) {
         banner(`The module runs firmware ${m.firmware} (protocol ${m.protocol}). Drums and CV/gate tracks play, but the IN tracks ` +
-          `and the CV/IN macro routing need firmware 0.3.1` + (m.protocol < 2 ? ', knob feedback and MAIN/X voice routing 0.2' : '') +
+          `and the CV/IN macro routing need firmware 0.3.2` + (m.protocol < 2 ? ', knob feedback and MAIN/X voice routing 0.2' : '') +
           `: flash the new workshop_tracker.uf2. Songs from the module are converted on reading.`);
       } else if (m.protocol > PROTOCOL_VERSION) {
         banner(`The module speaks protocol ${m.protocol}, this editor ${PROTOCOL_VERSION}. Reload the page or update the editor; some features may not work.`);
@@ -965,18 +1137,14 @@ function onMessage(data) {
     case 'header': case 'chunk': {
       const song = state.dump.feed(m);
       if (state.dumping) setConn('busy', `reading ${Math.round(state.dump.progress * 100)}%`);
-      if (song) {
-        state.dumping = false;
-        setConn('on', 'connected');
-        replaceSong(song, 'Loaded the song from the module.');
-      }
+      if (song) gotSongFromModule(song);
       break;
     }
     case 'dumpEnd': {
       const song = state.dump.feed(m);
       state.dumping = false;
       setConn('on', 'connected');
-      if (song) replaceSong(song, 'Loaded the song from the module.');
+      if (song) gotSongFromModule(song);
       break;
     }
     case 'status': onStatus(m); break;
@@ -984,6 +1152,55 @@ function onMessage(data) {
     case 'ack': onAck(m); break;
     default: break;
   }
+}
+
+// A whole song read from the module.
+function gotSongFromModule(song) {
+  state.dumping = false;
+  setConn('on', 'connected');
+  replaceSong(song, state.pullWhy || 'Loaded the song from the module.');
+  state.pullWhy = null;
+  state.dirty = false;
+  paintSlotNow();
+  // Firmware <= 0.3.1 keeps its old "0 V note" (C2): the editor converted the
+  // song to C0 = 0 V, so give the module the same notes and mapping.
+  if (state.dump.cvConverted && state.proto < 5 && dev.connected) {
+    send(msg.setZeroNote(12));
+    for (let p = 0; p < K.patterns; p++) for (let t = K.firstCv; t < K.firstIn; t++) sendTrack(p, t);
+  }
+}
+
+// The module plays another song than the editor shows: its slot knob (SELECT
+// page) chose another slot, or a song swap happened that the editor did not
+// ask for. Keep unsaved edits as a browser backup, then read the new song.
+function moduleSwitched(st) {
+  const name = state.song.name.trim() || 'song';
+  if (state.dirty) {
+    try {
+      localStorage.setItem(BACKUP_KEY, JSON.stringify(state.song.toJSON()));
+      localStorage.setItem(BACKUP_KEY + '.why', `unsaved edits to "${name}" (before the module switched to slot ${st.slot + 1})`);
+      $('btnRestore').hidden = false;
+    } catch {}
+    banner(`The module switched to slot ${st.slot + 1}. Your unsaved edits to "${name}" are kept in the browser: ` +
+      'Restore brings them back (then Send to module, or Save to module to keep them in a slot).');
+  }
+  state.pullWhy = `Module switched to slot ${st.slot + 1}: loaded its song.`;
+  pull();
+}
+
+function paintSlotNow() {
+  const pill = $('slotNow');
+  if (!pill) return;
+  const st = dev.connected ? state.status : null;
+  const lab = pill.querySelector('span');
+  pill.classList.toggle('on', !!st);
+  pill.classList.toggle('pending', !!st && st.swapPending);
+  if (!st) { lab.textContent = 'SLOT –'; pill.title = 'Connect to see which slot the module plays'; return; }
+  lab.innerHTML = '';
+  lab.append(document.createTextNode('SLOT '), el('b', null, String(st.slot + 1)),
+    document.createTextNode(st.swapPending ? ' → next at pattern end' : state.dirty ? ' · edited' : ''));
+  pill.title = `The module plays slot ${st.slot + 1}` + (state.dirty ? '; the editor has changes that are not saved to a slot yet' : '') +
+    '. Turning the slot knob on the module (SELECT page) loads the new song here too.';
 }
 
 const MODES = ['STOPPED', 'SONG', 'PATTERN'];
@@ -1006,7 +1223,14 @@ function onStatus(st) {
   if (state.follow && st.mode !== 0 && st.pattern !== state.pattern && (!prev || prev.pattern !== st.pattern)) selectPattern(st.pattern);
   paintPlayhead();
   paintArrangementPos();
-  st.peaks.forEach((p, i) => { if (meters[i]) meters[i].style.height = `${Math.min(100, (p / 127) * 100)}%`; });
+  st.peaks.forEach((p, i) => { if (meterBal[i]) meterBal[i].report(p); });
+  meterBal[8].report(st.reverbPeak || 0);
+  if (rvLed) rvLed.classList.toggle('lit', (st.reverbPeak || 0) > 0);
+  if (state.proto >= 7 && performance.now() - state.liveMute.at > 400 &&
+      (st.reverbMuted !== state.liveMute.reverb || st.masterMuted !== state.liveMute.master)) {
+    state.liveMute.reverb = st.reverbMuted; state.liveMute.master = st.masterMuted;
+    paintMutes();
+  }
   headHits.forEach((d, i) => d.classList.toggle('lit', i < K.firstCv ? !!(st.hits & (1 << i)) : i < K.firstIn ? st.gates[i - K.firstCv] : st.inGates[i - K.firstIn]));
   for (let v = 0; v < 4; v++) if (st.hits & (1 << v)) flashLed(voiceLeds[v]);
   gateLeds.forEach((l, i) => l.classList.toggle('lit', st.gates[i]));
@@ -1014,12 +1238,15 @@ function onStatus(st) {
   $('btnPlaySong').classList.toggle('on', st.mode === 1);
   $('btnPlayPat').classList.toggle('on', st.mode === 2);
   if (state.info && st.slot !== state.info.slot) { state.info.slot = st.slot; $('slot').value = st.slot; }
+  // Song swapped on the module without the editor asking (panel slot knob).
+  if (prev && st.swaps !== prev.swaps && !state.dumping && performance.now() - state.ownSwapAt > 4000) moduleSwitched(st);
+  if (!prev || st.slot !== prev.slot || st.swapPending !== prev.swapPending) paintSlotNow();
   if (!state.panel) { paintMods(); paintComputer(); } // v1 firmware: macros come with the status only
 }
 
 function syncTempoSwing(tempo, swing) {
-  if (tempo !== state.song.tempo && document.activeElement !== $('tempo')) { state.song.tempo = tempo; $('tempo').value = tempo; changed(); }
-  if (swing !== state.song.swing && document.activeElement !== $('swing')) { state.song.swing = swing; $('swing').value = swing; $('swingOut').textContent = swing + '%'; changed(); }
+  if (tempo !== state.song.tempo && document.activeElement !== $('tempo')) { state.song.tempo = tempo; $('tempo').value = tempo; synced(); }
+  if (swing !== state.song.swing && document.activeElement !== $('swing')) { state.song.swing = swing; $('swing').value = swing; $('swingOut').textContent = swing + '%'; synced(); }
 }
 
 // Knob/macro feedback from the module (protocol v2).
@@ -1029,10 +1256,10 @@ function onPanel(p) {
   state.panelAt = performance.now();
   // Routing edits from another editor (or a song loaded on the module).
   if (performance.now() - lastMaskEdit > 800 && (p.masks[0] !== state.song.macroMask(0) || p.masks[1] !== state.song.macroMask(1))) {
-    state.song.setMacroMask(0, p.masks[0]); state.song.setMacroMask(1, p.masks[1]); changed(); paintRoutes();
+    state.song.setMacroMask(0, p.masks[0]); state.song.setMacroMask(1, p.masks[1]); synced(); paintRoutes();
   }
   if (p.v3 && performance.now() - lastMaskEdit > 800 && (p.cvinMasks[0] !== state.song.macroCvMask(0) || p.cvinMasks[1] !== state.song.macroCvMask(1))) {
-    state.song.setMacroCvMask(0, p.cvinMasks[0]); state.song.setMacroCvMask(1, p.cvinMasks[1]); changed(); paintRoutes();
+    state.song.setMacroCvMask(0, p.cvinMasks[0]); state.song.setMacroCvMask(1, p.cvinMasks[1]); synced(); paintRoutes();
   }
   syncTempoSwing(p.tempo, p.swing);
   paintMods();
@@ -1058,7 +1285,10 @@ function banner(text) {
 function hideBanner() { $('banner').hidden = true; }
 
 function onAck(m) {
-  if (m.op === 'save') toast(m.status === 'ok' ? `Saved to slot ${m.slot + 1}.` : `Saving slot ${m.slot + 1} failed (${m.status}).`);
+  if (m.op === 'save') {
+    toast(m.status === 'ok' ? `Saved to slot ${m.slot + 1}.` : `Saving slot ${m.slot + 1} failed (${m.status}).`);
+    if (m.status === 'ok') { state.dirty = false; paintSlotNow(); }
+  }
   if (m.op === 'load') {
     if (m.status === 'ok') { toast(`Slot ${m.slot + 1} loaded on the module, reading it…`); pull(); }
     else toast(`Slot ${m.slot + 1} is empty.`);
@@ -1083,6 +1313,7 @@ function setConn(kind, text) {
   c.className = 'pill ' + kind;
   c.querySelector('span').textContent = text;
   $('btnConnect').textContent = dev.connected ? 'Disconnect' : 'Connect';
+  paintSlotNow();
 }
 
 function pull() {
@@ -1141,7 +1372,11 @@ async function connect() {
   await dev.connect(pair.inp, pair.out);
   state.panel = null; state.status = null; state.legacy = false;
   setConn('on', 'connected');
-  try { localStorage.setItem(BACKUP_KEY, JSON.stringify(state.song.toJSON())); $('btnRestore').hidden = false; } catch {}
+  try {
+    localStorage.setItem(BACKUP_KEY, JSON.stringify(state.song.toJSON()));
+    localStorage.setItem(BACKUP_KEY + '.why', 'the song the browser had before connecting');
+    $('btnRestore').hidden = false;
+  } catch {}
   send(msg.hello());
   send(msg.ping());
   clearInterval(pingTimer);
@@ -1202,7 +1437,7 @@ function wire() {
   $('btnPlayPat').onclick = () => send(msg.playPattern(state.pattern));
   $('btnStop').onclick = () => send(msg.stop());
   $('btnNext').onclick = () => send(msg.nextPart());
-  $('btnLoad').onclick = () => { if (!dev.connected) return toast('Not connected'); send(msg.load(+$('slot').value)); };
+  $('btnLoad').onclick = () => { if (!dev.connected) return toast('Not connected'); state.ownSwapAt = performance.now(); send(msg.load(+$('slot').value)); };
   $('btnSave').onclick = () => {
     if (!dev.connected) return toast('Not connected');
     const slot = +$('slot').value;
@@ -1215,12 +1450,12 @@ function wire() {
   $('btnNew').onclick = () => {
     if (!confirm('Start a new empty song in the editor (and on the module if connected)?')) return;
     replaceSong(new Song(), 'New song.');
-    if (dev.connected) send(msg.initSong(0));
+    if (dev.connected) { state.ownSwapAt = performance.now(); send(msg.initSong(0)); }
   };
   $('btnDemo').onclick = () => {
     if (!confirm('Load the demo song (editor and module)?')) return;
     replaceSong(demoSong(), 'Demo song loaded.');
-    if (dev.connected) send(msg.initSong(1));
+    if (dev.connected) { state.ownSwapAt = performance.now(); send(msg.initSong(1)); }
   };
   $('btnExport').onclick = () => {
     const blob = new Blob([JSON.stringify(state.song.toJSON())], { type: 'application/json' });
@@ -1236,7 +1471,11 @@ function wire() {
     e.target.value = '';
   };
   $('btnRestore').onclick = () => {
-    try { replaceSong(Song.fromJSON(JSON.parse(localStorage.getItem(BACKUP_KEY))), 'Browser song restored (not sent to the module).'); } catch { toast('No backup'); }
+    try {
+      const why = localStorage.getItem(BACKUP_KEY + '.why') || 'the song the browser had before connecting';
+      replaceSong(Song.fromJSON(JSON.parse(localStorage.getItem(BACKUP_KEY))), `Restored ${why}. Not on the module yet: use Send to module.`);
+      state.dirty = true; paintSlotNow();
+    } catch { toast('No backup'); }
   };
   $('btnAddEntry').onclick = () => {
     const n = state.song.songLen;
@@ -1269,7 +1508,23 @@ function wire() {
     for (let t = 0; t < K.tracks; t++) { for (let r = 0; r < K.rows; r++) state.song.setCell(state.pattern, t, r, { note: 0, vel: 0, fx: 0, fxv: 0 }); sendTrack(state.pattern, t); }
     changed(); buildGrid();
   };
-  $('btnHelp').onclick = () => $('help').showModal();
+  $('btnHelp').onclick = () => { $('help').showModal(); paintKeyboard(true); };
+  $('btnKbd').onclick = () => showKeyboard($('kbd').hidden);
+  $('kbdClose').onclick = () => showKeyboard(false);
+  $('kbdLayout').onclick = () => {
+    kb.map = null; // manual choice overrides the detected map
+    kb.layout = kb.layout === 'qwerty' ? 'qwertz' : 'qwerty';
+    try { localStorage.setItem(KB_KEY + '.layout', kb.layout); } catch {}
+    paintKeyboard(true);
+  };
+  (async () => {
+    let saved = null;
+    try { saved = localStorage.getItem(KB_KEY + '.layout'); } catch {}
+    if (saved) kb.layout = saved;
+    else { const d = await detectLayout(); kb.layout = d.layout; kb.map = d.map; }
+    paintKeyboard(true);
+  })();
+  showKeyboard((() => { try { return localStorage.getItem(KB_KEY) !== '0'; } catch { return true; } })());
   const grid = $('grid');
   grid.addEventListener('keydown', onGridKey);
   grid.addEventListener('mousedown', (e) => {
@@ -1294,4 +1549,5 @@ wire();
 buildComputer();
 refreshAll();
 setInterval(paintComputer, 500); // live LED timeout
+requestAnimationFrame(animateMeters);
 $('grid').focus();

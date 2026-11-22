@@ -47,13 +47,14 @@ enum Fx : uint8_t {
     FxRatchet = 'R',     // both: 2..8 hits inside the row
     FxProb = 'P',        // both: chance 0..100 %
     FxDelay = 'K',       // both: delay the row's event by n/16 row ("kick" late)
+    FxSend = 'W',        // drum/IN: reverb send ("wet") for this hit, 0..127 (0.4.1)
 };
 
 // One step: note, velocity and one effect (letter + value).
 // (Firmware 0.3.0 had a second effect column; its songs are converted on load.)
 struct Cell {
     uint8_t note;
-    uint8_t vel;   // 0 = default (drums 100, CV/IN: full VCA level)
+    uint8_t vel;   // 0 = default (drums 100, IN: full VCA level). CV tracks: unused (always 0, 0.3.2)
     uint8_t fx;
     uint8_t fxv;
 };
@@ -84,12 +85,14 @@ enum MixParam { MpLevel = 0, MpPan, MpDrive, MpTone, MpVca, MpMute, MpVcaSrc, Mp
 enum VcaSrc : uint8_t {
     VcaAuto = 0,      // v2: follow the CV gate if decay > 0, else open
     VcaOpen = 1,      // always open (input passes through)
-    VcaCvGate = 2,    // follow the CV track's gate (CV velocity = level)
+    VcaCvGate = 2,    // follow the CV track's gate (full level; the mixer level sets the volume)
     VcaInTrack = 3,   // triggered by the IN track (velocity = level)
     VcaSrcCount = 4,
 };
-// Master parameters.
-enum MasterParam { MsLevel = 0, MsDrive, MsFilter, MsR3, MsR4, MsR5, MsR6, MsR7 };
+// Master parameters. 3..7: the lo-fi reverb (0.4.0, song header fx_ver 1).
+enum MasterParam { MsLevel = 0, MsDrive, MsFilter, MsRvReturn, MsRvSize, MsRvDecay, MsRvTone, MsRvLofi };
+constexpr uint8_t kRvDefaults[5] = {96, 64, 64, 56, 40};   // return, size, decay, tone, lo-fi
+constexpr uint8_t kFxVersion = 1;   // SongHeader::fx_ver of a 0.4.0 song
 
 enum Macro { MacroDecay = 0, MacroColour = 1, MacroFilter = 2 };
 
@@ -105,7 +108,9 @@ struct SongHeader {
     uint8_t tempo_lo;
     uint8_t swing;         // 50..75 %
     uint8_t song_len;      // 1..32 entries
-    uint8_t cv_zero_note;  // MIDI note that gives 0 V on the CV outs (default 36 = C2)
+    // MIDI note that gives 0 V on the CV outs. Fixed at kCvZeroNote (12 = C0) since
+    // 0.3.2; older songs (default 36 = C2) are converted by song_migrate_cv().
+    uint8_t cv_zero_note;
     // Panel macro routing (protocol v2). Bit v set = drum voice v is NOT
     // affected by that macro, so 0 (old songs, v1 flash slots) = all voices.
     uint8_t macro_excl[2];  // [MacroDecay] = Main knob, [MacroColour] = X knob
@@ -113,7 +118,11 @@ struct SongHeader {
     // bit 0/1 = CV1/CV2, bit 2/3 = IN1/IN2. 0 in v2 songs = not routed, as before.
     // Main: CV gate length / IN VCA decay. X: CV glide / IN drive.
     uint8_t macro_cvin[2];
-    uint8_t reserved[7];
+    // Reverb send per mixer channel (0.4.0, was reserved = 0 = dry).
+    uint8_t fx_send[kChannels];
+    // 0 = song from before 0.4.0 (master[3..7] meant nothing): header_sanitize()
+    // then sets the reverb defaults with all sends at 0, so it sounds as before.
+    uint8_t fx_ver;
     uint8_t pat_len[kPatterns];             // 1..64
     SongEntry entries[kSongEntries];
     uint8_t drum[kDrumTracks][kParamsPerVoice];
@@ -166,6 +175,18 @@ constexpr int kV030SongBytes = kSongHeaderBytes + kPatterns * kTracks * kRows * 
 
 inline void header_sanitize(SongHeader& s);
 
+// CV pitch range (0.3.2): only positive voltages, C0 = 0 V, 1 V/oct.
+// Notes C0..B5 (MIDI 12..83) = 0..5.917 V, inside the calibrated DAC range.
+constexpr uint8_t kCvZeroNote = 12;   // C0 = 0 V
+constexpr uint8_t kCvNoteMin = 12;    // C0
+constexpr uint8_t kCvNoteMax = 83;    // B5
+// Move a CV note into kCvNoteMin..kCvNoteMax by whole octaves.
+inline int cv_fold_note(int n) {
+    while (n < kCvNoteMin) n += 12;
+    while (n > kCvNoteMax) n -= 12;
+    return n;
+}
+
 inline uint8_t c7(int v) { return static_cast<uint8_t>(v < 0 ? 0 : (v > 127 ? 127 : v)); }
 
 // Clamp every field into its legal range (used after loading from flash or USB).
@@ -178,10 +199,15 @@ inline void header_sanitize(SongHeader& s) {
     if (s.swing > kSwingMax) s.swing = kSwingMax;
     if (s.song_len < 1) s.song_len = 1;
     if (s.song_len > kSongEntries) s.song_len = kSongEntries;
-    if (s.cv_zero_note > 126) s.cv_zero_note = 36;
+    s.cv_zero_note = kCvZeroNote;   // run song_migrate_cv() first for songs from older firmware
     for (uint8_t& v : s.macro_excl) v &= 0x0F;
     for (uint8_t& v : s.macro_cvin) v &= 0x0F;
-    for (uint8_t& v : s.reserved) v = 0;
+    if (s.fx_ver != kFxVersion) {
+        for (uint8_t& v : s.fx_send) v = 0;
+        for (int i = 0; i < 5; ++i) s.master[MsRvReturn + i] = kRvDefaults[i];
+        s.fx_ver = kFxVersion;
+    }
+    for (uint8_t& v : s.fx_send) v = c7(v);
     for (uint8_t& l : s.pat_len) {
         if (l < 1) l = 1;
         if (l > kRows) l = kRows;
@@ -205,7 +231,26 @@ inline void header_sanitize(SongHeader& s) {
     for (uint8_t& v : s.master) v = c7(v);
 }
 
+// Songs from firmware <= 0.3.1 used a free "0 V note" (default C2) and could
+// hold CV notes below it (all clamped to 0 V). Convert to the fixed C0 = 0 V
+// mapping: every in-range note keeps its voltage, notes outside C0..B5 move by
+// octaves into it, and the (meaningless) CV velocity is cleared. Idempotent:
+// a 0.3.2 song (zero note 12, notes in range, vel 0) is left unchanged.
+inline void song_migrate_cv(Song& s) {
+    const int zero = s.cv_zero_note <= 126 ? s.cv_zero_note : 36;
+    const int shift = zero - kCvZeroNote;
+    for (auto& p : s.cells)
+        for (int t = kFirstCvTrack; t < kFirstInTrack; ++t)
+            for (Cell& c : p[t]) {
+                c.vel = 0;
+                if (c.note == kNoteEmpty || c.note >= kNoteOff) continue;
+                c.note = static_cast<uint8_t>(cv_fold_note(c.note - shift));
+            }
+    s.cv_zero_note = kCvZeroNote;
+}
+
 inline void song_sanitize(Song& s) {
+    song_migrate_cv(s);
     header_sanitize(s);
     for (auto& p : s.cells) for (auto& t : p) for (Cell& c : t) {
         c.note = c7(c.note); c.vel = c7(c.vel); c.fx = c7(c.fx); c.fxv = c7(c.fxv);
@@ -218,7 +263,7 @@ inline void song_clear(Song& s) {
     s.set_tempo(120);
     s.swing = 50;
     s.song_len = 1;
-    s.cv_zero_note = 36;
+    s.cv_zero_note = kCvZeroNote;
     for (uint8_t& l : s.pat_len) l = 16;
     for (int i = 0; i < kSongEntries; ++i) {
         s.entries[i].pattern = static_cast<uint8_t>(i < kPatterns ? i : 0);
@@ -258,6 +303,8 @@ inline void song_clear(Song& s) {
     s.master[MsLevel] = 120;
     s.master[MsDrive] = 10;
     s.master[MsFilter] = 64;
+    for (int i = 0; i < 5; ++i) s.master[MsRvReturn + i] = kRvDefaults[i];
+    s.fx_ver = kFxVersion;   // all sends 0: dry until a send is turned up
 }
 
 inline void set_cell(Song& s, int p, int t, int r, uint8_t note, uint8_t vel = 0,
@@ -324,8 +371,9 @@ inline void song_demo(Song& s) {
     }
     // Pattern 0: plucked bass line on track 4, VCO lines.
     const uint8_t pluck[16] = {48, 0, 0, 55, 0, 0, 51, 0, 48, 0, 58, 0, 0, 55, 0, 0};
-    const uint8_t vco1[16] = {36, 0, 0, 0, 43, 0, 0, 0, 39, 0, 0, 0, 41, 0, 43, 0};
-    const uint8_t vco2[16] = {60, 0, 63, 0, 67, 0, 63, 0, 60, 0, 70, 0, 67, 0, 63, 0};
+    // CV lines (C0 = 0 V): VCO1 around 0-0.6 V, VCO2 around 2 V.
+    const uint8_t vco1[16] = {12, 0, 0, 0, 19, 0, 0, 0, 15, 0, 0, 0, 17, 0, 19, 0};
+    const uint8_t vco2[16] = {36, 0, 39, 0, 43, 0, 39, 0, 36, 0, 46, 0, 43, 0, 39, 0};
     for (int r = 0; r < 16; ++r) {
         if (pluck[r]) set_cell(s, 0, 3, r, pluck[r], 96);
         if (vco1[r]) set_cell(s, 0, 4, r, vco1[r]);
@@ -340,7 +388,7 @@ inline void song_demo(Song& s) {
     set_cell(s, 1, 3, 8, 46, 90);
     // Pattern 2: fill.
     for (int r = 8; r < 16; ++r) set_cell(s, 2, 1, r, static_cast<uint8_t>(45 + r), static_cast<uint8_t>(40 + r * 5));
-    set_cell(s, 2, 4, 0, 36, 0, FxGate, 64);
+    set_cell(s, 2, 4, 0, 12, 0, FxGate, 64);
     set_cell(s, 2, 5, 0, kNoteOff);
     set_cell(s, 2, 2, 15, 84, 70, FxRatchet, 4);
     // IN1 follows its own track (accents on the VCO), IN2 stays open.

@@ -5,6 +5,7 @@
 #include "engine/flashstore.h"
 #include "engine/protocol.h"
 
+#include <cmath>
 #include <cstdio>
 #include <algorithm>
 #include <cstdlib>
@@ -197,11 +198,11 @@ static void test_cv_tracks() {
     auto s = make_song(false);
     s->set_tempo(120);
     s->cv[0][CpGate] = 8;
-    set_cell(*s, 0, 4, 0, 36);          // C2 -> 0 V
-    set_cell(*s, 0, 4, 1, 48);          // C3 -> 1 V
-    set_cell(*s, 0, 4, 2, 60, 0, FxSlide, 30);
-    set_cell(*s, 0, 4, 4, 30);          // below zero note -> clamps at 0 V
-    set_cell(*s, 0, 5, 0, 48, 0, FxGate, 0);   // tie
+    set_cell(*s, 0, 4, 0, 12);          // C0 -> 0 V
+    set_cell(*s, 0, 4, 1, 24);          // C1 -> 1 V
+    set_cell(*s, 0, 4, 2, 36, 0, FxSlide, 30);
+    set_cell(*s, 0, 4, 4, 6);           // below C0 (raw) -> folded up an octave: F#0 = 0.5 V
+    set_cell(*s, 0, 5, 0, 24, 0, FxGate, 0);   // tie
     set_cell(*s, 0, 5, 3, kNoteOff);
     Sequencer q;
     q.attach(s.get());
@@ -223,14 +224,22 @@ static void test_cv_tracks() {
     CHECK(gate_high_after == 12050);    // row 1 gate closed before row 2: the slide jumps and opens the gate
     CHECK(std::abs(q.cv_mv(0) - 2000) <= 2);
     for (int i = 0; i < 6000 * 2; ++i) q.tick(ck);
-    CHECK(q.cv_mv(0) == 0);             // note 30 < zero note 36 -> 0 V
+    CHECK(std::abs(q.cv_mv(0) - 500) <= 2);   // never negative: folded by an octave
     CHECK(!q.gate(1));                  // OFF at row 3
+    // Transposition (CV In 1) folds by octaves too: never below 0 V, never above 6 V.
+    q.set_transpose(-17);               // F#0 - 17 = C#-1 -> C#0
+    for (int i = 0; i < 8; ++i) q.tick(ck);
+    CHECK(std::abs(q.cv_mv(0) - 83) <= 2);
+    q.set_transpose(66);                // F#0 + 66 = C6 -> C5 (5 V)
+    for (int i = 0; i < 8; ++i) q.tick(ck);
+    CHECK(std::abs(q.cv_mv(0) - 5000) <= 2);
+    q.set_transpose(0);
 
     // Slide while the gate is held: glides, gate stays high.
     auto s2 = make_song(false);
     s2->cv[0][CpGate] = 0;              // tie
-    set_cell(*s2, 0, 4, 0, 48);
-    set_cell(*s2, 0, 4, 1, 60, 0, FxSlide, 40);
+    set_cell(*s2, 0, 4, 0, 24);
+    set_cell(*s2, 0, 4, 1, 36, 0, FxSlide, 40);
     q.attach(s2.get());
     q.play_pattern(0);
     for (int i = 0; i < 6000 + 200; ++i) q.tick(ck);
@@ -272,7 +281,7 @@ static void test_drum_fx() {
     CHECK(hits[0] == 4);
     CHECK(hits[1] == 0);
     CHECK(hits[2] == 1);
-    CHECK(std::abs(delay_at - (12000 + 4 + 3000)) <= 2);   // track 2 is read 4 samples into the row
+    CHECK(std::abs(delay_at - (12000 + 2 + 3000)) <= 2);   // track 2 is read 2 samples into the row (0.4.0: one track per free sample)
 }
 
 // --------------------------------------------------------------- panel -----
@@ -280,6 +289,7 @@ static void test_panel() {
     Panel p;
     int k[3] = {2048, 2048, 2048};
     p.begin(k, Sw::Middle, 120, 50, 0);
+    p.set_slot_mask(0x3F);   // all six slots hold songs
     PanelOut o;
     // Tap down (> debounce, < hold).
     bool tap = false, stop = false;
@@ -318,6 +328,65 @@ static void test_panel() {
     for (int i = 0; i < 200; ++i) p.process(k, Sw::Middle, tempo, 50, o);
     CHECK(p.macro(0) > 50);
     CHECK(p.waiting());
+}
+
+// 0.3.2: the slot knob's travel is split evenly over the occupied slots.
+static void test_slot_zones() {
+    CHECK(Panel::raw_zone(2047, 2) == 0 && Panel::raw_zone(2048, 2) == 1);
+    CHECK(Panel::raw_zone(1365, 3) == 0 && Panel::raw_zone(1366, 3) == 1 && Panel::raw_zone(2731, 3) == 2);
+    CHECK(Panel::raw_zone(4095, 1) == 0);
+    // Hysteresis: from zone 0 the knob must pass 50 % + 64 counts.
+    CHECK(Panel::hyst_zone(2100, 2, 0) == 0 && Panel::hyst_zone(2120, 2, 0) == 1);
+    CHECK(Panel::hyst_zone(2000, 2, 1) == 1 && Panel::hyst_zone(1980, 2, 1) == 0);
+    auto run = [](Panel& p, int knob, int n, int& sel) {
+        int k[3] = {knob, 2048, 2048};
+        PanelOut o;
+        for (int i = 0; i < n; ++i) { p.process(k, Sw::Up, 120, 50, o); if (o.select_slot >= 0) sel = o.select_slot; }
+    };
+    {   // Two songs in slots 1 and 3 (index 0, 2), playing slot 1.
+        Panel p;
+        int k[3] = {0, 2048, 2048};
+        p.begin(k, Sw::Middle, 120, 50, 0);
+        p.set_slot_mask(0x05);
+        int sel = -1;
+        run(p, 0, 400, sel);             // SELECT page, knob in the first half
+        CHECK(sel == -1);
+        run(p, 2100, 4000, sel);         // just past 50 %, inside the hysteresis
+        CHECK(sel == -1);
+        run(p, 2200, 4000, sel);         // second half -> slot index 2 (empty slots skipped)
+        CHECK(sel == 2 && p.slot() == 2);
+        sel = -1;
+        run(p, 2000, 4000, sel);         // wobble around the middle: nothing
+        CHECK(sel == -1);
+        run(p, 1000, 4000, sel);
+        CHECK(sel == 0);
+    }
+    {   // Three songs (slots 2, 4, 6 = index 1, 3, 5): edges at 33 % and 66 %.
+        Panel p;
+        int k[3] = {3500, 2048, 2048};
+        p.begin(k, Sw::Middle, 120, 50, 1);
+        p.set_slot_mask(0x2A);
+        int sel = -1;
+        run(p, 3500, 4000, sel);         // opening the page on slot 6's zone loads nothing
+        CHECK(sel == -1);
+        run(p, 2000, 4000, sel);         // middle third
+        CHECK(sel == 3);
+        run(p, 3500, 4000, sel);
+        CHECK(sel == 5);
+        sel = -1;
+        run(p, 500, 4000, sel);          // first third = the playing slot 2 again
+        CHECK(sel == 1);
+    }
+    {   // Only one song: the knob does nothing.
+        Panel p;
+        int k[3] = {0, 2048, 2048};
+        p.begin(k, Sw::Up, 120, 50, 0);
+        p.set_slot_mask(0x01);
+        int sel = -1;
+        run(p, 4000, 4000, sel);
+        run(p, 0, 4000, sel);
+        CHECK(sel == -1);
+    }
 }
 
 // ----------------------------------------------------------- protocol ------
@@ -434,7 +503,7 @@ static void test_protocol() {
     Mixer mx;
     uint8_t buf[64];
     const int n = proto::build_status(buf, st, *s, mx, 40, 50, 3);
-    CHECK(n == 29);
+    CHECK(n == 30);
     bool ok = true;
     for (int i = 0; i < n; ++i) if (buf[i] & 0x80) ok = false;
     CHECK(ok);
@@ -589,8 +658,8 @@ static void test_macros_v2() {
     feed(sysex({proto::SetMacroMask, 0}));
     CHECK(pr.rejected() == rej + 3);
     feed(sysex({proto::Hello}));
-    CHECK(!h.sent.empty() && h.sent.back()[0] == proto::Info && h.sent.back()[1] == 4 && h.sent.back()[3] == 3 &&
-          h.sent.back()[4] == 1 && h.sent.back()[5] == 8);
+    CHECK(!h.sent.empty() && h.sent.back()[0] == proto::Info && h.sent.back()[1] == 7 && h.sent.back()[3] == 4 &&
+          h.sent.back()[4] == 2 && h.sent.back()[5] == 8);
 
     // Panel report contents.
     EngineStatus st;
@@ -688,7 +757,62 @@ struct Core1Sim {
     }
 };
 
-static int zone_knob(int zone) { return zone * 4096 / 6 + 340; }   // middle of a slot zone
+// 0.3.2: fixed CV mapping C0 = 0 V; older songs keep their voltages.
+static void test_cv_migration() {
+    auto s = make_song(false);
+    s->cv_zero_note = 36;                              // 0.3.1 default: C2 = 0 V
+    set_cell(*s, 0, 4, 0, 36, 90);                     // 0 V -> C0, velocity dropped
+    set_cell(*s, 0, 4, 1, 48);                         // 1 V -> C1
+    set_cell(*s, 0, 4, 2, 30);                         // below the old 0 V note (was stuck at 0 V) -> F#0
+    set_cell(*s, 3, 5, 9, 120);                        // above 6 V -> folded down to C5
+    set_cell(*s, 0, 5, 3, kNoteOff, 50);
+    set_cell(*s, 0, 6, 0, 30, 70);                     // IN track: untouched
+    set_cell(*s, 0, 0, 0, 30, 70);                     // drum: untouched
+    song_sanitize(*s);
+    CHECK(s->cv_zero_note == kCvZeroNote);
+    CHECK(s->cells[0][4][0].note == 12 && s->cells[0][4][0].vel == 0);
+    CHECK(s->cells[0][4][1].note == 24);
+    CHECK(s->cells[0][4][2].note == 18);
+    CHECK(s->cells[3][5][9].note == 72);
+    CHECK(s->cells[0][5][3].note == kNoteOff && s->cells[0][5][3].vel == 0);
+    CHECK(s->cells[0][6][0].note == 30 && s->cells[0][6][0].vel == 70);
+    CHECK(s->cells[0][0][0].note == 30 && s->cells[0][0][0].vel == 70);
+    const Song before = *s;
+    song_sanitize(*s);                                 // idempotent
+    CHECK(std::memcmp(&before, s.get(), sizeof(Song)) == 0);
+    // A custom 0 V note (C3 = 48) keeps its voltages too.
+    auto c = make_song(false);
+    c->cv_zero_note = 48;
+    set_cell(*c, 0, 4, 0, 60);                         // 1 V
+    song_sanitize(*c);
+    CHECK(c->cells[0][4][0].note == 24);
+    // Demo and new songs: every CV note in C0..B5, no CV velocity.
+    auto d = make_song(true);
+    bool ok = d->cv_zero_note == kCvZeroNote;
+    for (auto& p : d->cells)
+        for (int t = kFirstCvTrack; t < kFirstInTrack; ++t)
+            for (const Cell& x : p[t]) {
+                if (x.vel) ok = false;
+                if (x.note && x.note != kNoteOff && (x.note < kCvNoteMin || x.note > kCvNoteMax)) ok = false;
+            }
+    CHECK(ok);
+    // Protocol: SetZeroNote is ignored, CV cells lose their velocity and fold into range.
+    TestHost h(s.get());
+    proto::Protocol pr(h);
+    auto feed = [&](const std::vector<uint8_t>& v) { pr.feed(v.data(), static_cast<int>(v.size())); };
+    feed(sysex({proto::SetZeroNote, 36}));
+    CHECK(s->cv_zero_note == kCvZeroNote);
+    feed(sysex({proto::SetCell, 1, 4, 0, 100, 80, 0, 0}));   // E7 -> E5, vel 0
+    CHECK(s->cells[1][4][0].note == 76 && s->cells[1][4][0].vel == 0);
+    feed(sysex({proto::SetCell, 1, 6, 0, 100, 80, 0, 0}));   // IN track keeps its LVL
+    CHECK(s->cells[1][6][0].note == 100 && s->cells[1][6][0].vel == 80);
+    SongHeader hd = *s;
+    hd.cv_zero_note = 40;
+    header_sanitize(hd);
+    CHECK(hd.cv_zero_note == kCvZeroNote);
+}
+
+static int zone_knob(int zone, int n = 2) { return zone * 4096 / n + 2048 / n; }   // middle of a slot zone (n occupied slots)
 
 static void test_slot_select_bug() {
     // Two saved slots (1 and 2 = index 0 and 1), started from slot 2, playing.
@@ -702,6 +826,7 @@ static void test_slot_select_bug() {
     *a = *c1.slots[1];
     in.knobs[0] = zone_knob(1);
     eng->init(a.get(), b.get(), 1, in);
+    push_cmd(*eng, Command{CmdType::SetSlotMask, 0x03, 0, 0});   // core 1 at boot: slots 1 and 2 hold songs
     eng->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
     c1.run(4800);
     in.sw = Sw::Up;                      // SELECT page
@@ -772,12 +897,17 @@ static void test_slot_select_bug() {
     eng->commands().push(Command{CmdType::Stop, 0, 0, 0});
     c1.run(100);
     const uint32_t playing = eng->status().slot;
-    in.knobs[0] = zone_knob(4);
+    CHECK(playing == 1);
+    // (Can only happen if the flash record breaks after boot: slot 5 listed but empty.)
+    push_cmd(*eng, Command{CmdType::SetSlotMask, 0x13, 0, 0});
+    in.knobs[0] = zone_knob(1, 3);
+    c1.run(kSampleRate / 2);
+    in.knobs[0] = zone_knob(2, 3);
     c1.run(kSampleRate / 2);
     CHECK(c1.serve());
     c1.run(100);
     CHECK(eng->status().slot == playing && eng->panel().slot() == static_cast<int>(playing));
-    in.knobs[0] = zone_knob(0);
+    in.knobs[0] = zone_knob(0, 3);
     c1.run(kSampleRate / 2);
     CHECK(c1.serve());
     c1.run(100);
@@ -813,7 +943,7 @@ static void test_fx() {
     CHECK(hits[0] == 4);
     CHECK(hits[1] == 0);
     CHECK(hits[2] == 1 && lock.a == 10 && lock.decay == kNoLock && lock.b == kNoLock);
-    CHECK(hits[3] == 1 && std::abs(first3 - (6 + 3000)) <= 2);
+    CHECK(hits[3] == 1 && std::abs(first3 - (3 + 3000)) <= 2);
 }
 
 static void test_in_tracks() {
@@ -877,9 +1007,9 @@ static void test_in_tracks() {
     const int32_t full = level_for(0, VcaInTrack), half = level_for(64, VcaInTrack), loud = level_for(127, VcaInTrack);
     std::printf("  IN VCA level: vel default %d, 64 %d, 127 %d, open %d\n", full, half, loud, level_for(64, VcaOpen));
     CHECK(half > 0 && half < loud * 3 / 4 && std::abs(full - loud) <= 2);
-    // Follow-CV mode: CV-track velocity is the VCA level (old songs: vel 0 = full).
+    // Follow-CV mode (0.3.2): the CV gate opens the VCA at full level; a CV velocity has no effect.
     const int32_t cv_half = level_for(64, VcaCvGate), cv_full = level_for(0, VcaCvGate);
-    CHECK(cv_half > 0 && cv_half < cv_full * 3 / 4);
+    CHECK(cv_full > 0 && cv_half == cv_full && std::abs(cv_full - full) <= 2);
     CHECK(level_for(64, VcaOpen) == level_for(0, VcaOpen));
 }
 
@@ -1073,6 +1203,408 @@ static void test_protocol_v4() {
     CHECK(b[16] == (1 | 8));
 }
 
+// ----------------------------------------------- 0.4.0: optimisations + reverb --
+static void test_v040_exact() {
+    init_tables();
+    // Fast integer square root == reference everywhere we probe (the full
+    // 2^32 range was checked once offline, see docs/CPU_BUDGET.md).
+    uint32_t x = 1;
+    int bad = 0;
+    for (uint32_t i = 0; i < 70000; ++i) if (isqrt32_fast(i) != isqrt32(i)) ++bad;
+    for (uint32_t r = 1; r < 65536; r += 7) {
+        const uint32_t sq = r * r;
+        if (isqrt32_fast(sq) != r || isqrt32_fast(sq - 1) != r - 1) ++bad;
+        if (r < 65535 && isqrt32_fast(sq + 2 * r) != r) ++bad;
+    }
+    for (int i = 0; i < 2000000; ++i) {
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        if (isqrt32_fast(x) != isqrt32(x)) ++bad;
+    }
+    CHECK(isqrt32_fast(0xFFFFFFFFu) == 65535);
+    CHECK(bad == 0);
+    // Kick pitch sweep without the 64-bit multiply: same value.
+    bad = 0;
+    for (int i = 0; i < 1000000; ++i) {
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        const uint32_t inc = x, k = (x >> 7) % 57000u, m = 4096u + k;
+        const uint32_t ref = static_cast<uint32_t>((static_cast<uint64_t>(inc) * m) >> 12);
+        const uint32_t fast = ((inc >> 16) * m << 4) + (((inc & 0xFFFFu) * m) >> 12);
+        if (ref != fast) ++bad;
+    }
+    CHECK(bad == 0);
+}
+
+static void test_v040_early_end() {
+    // A voice with an end threshold stops earlier; until then it is sample-identical,
+    // afterwards the reference output stays below the threshold.
+    init_tables();
+    for (int eng : {EngKick, EngNoise, EngMetal, EngSnare, EngPluck, EngModal}) {
+        DrumVoice ref, fast;
+        ref.seed(77); fast.seed(77);
+        const int32_t thr = 6, none = 0;
+        ref.set_end_threshold(&none);
+        fast.set_end_threshold(&thr);
+        TriggerArgs t;
+        t.engine = static_cast<uint8_t>(eng); t.note = 48; t.vel = 120; t.decay = 50; t.a = 40; t.b = 20;
+        ref.trigger(t); fast.trigger(t);
+        int n_ref = 0, n_fast = 0, mism = 0;
+        int32_t after = 0;
+        for (int i = 0; i < kSampleRate * 8; ++i) {
+            const int32_t a = ref.render(), b = fast.render();
+            if (ref.active()) ++n_ref;
+            if (fast.active()) { ++n_fast; if (a != b) ++mism; }
+            else if (std::abs(a - b) > after) after = std::abs(a - b);
+            if (!fast.active()) fast.idle();
+        }
+        CHECK(mism == 0);
+        CHECK(n_fast <= n_ref);
+        CHECK(after <= thr);
+        std::printf("  early end, engine %d: %d -> %d active samples, tail after end <= %d\n", eng, n_ref, n_fast, after);
+    }
+}
+
+static void test_v040_song() {
+    // Old songs (fx_ver 0): reverb defaults, sends 0. 0.4.0 songs keep their values.
+    Song s;
+    song_clear(s);
+    CHECK(s.fx_ver == kFxVersion);
+    for (int c = 0; c < kChannels; ++c) CHECK(s.fx_send[c] == 0);
+    s.fx_ver = 0;
+    s.fx_send[2] = 90;
+    s.master[MsRvDecay] = 3;
+    header_sanitize(s);
+    CHECK(s.fx_send[2] == 0 && s.master[MsRvDecay] == kRvDefaults[2] && s.fx_ver == kFxVersion);
+    s.fx_send[2] = 90;
+    s.master[MsRvDecay] = 3;
+    header_sanitize(s);
+    CHECK(s.fx_send[2] == 90 && s.master[MsRvDecay] == 3);
+    // Protocol: SetMix param 8 = send, 9 is rejected; SetMaster 3..7 = reverb.
+    struct H : proto::Host {
+        Song* s;
+        Song* live() override { return s; }
+        void send(const uint8_t*, int) override {}
+        bool command(const Command&) override { return true; }
+        void request_save(int) override {}
+        void request_load(int) override {}
+        void request_init(int) override {}
+        void info_fields(uint8_t& a, uint8_t& b) override { a = b = 0; }
+        void pinged() override {}
+    } h;
+    h.s = &s;
+    proto::Protocol pr(h);
+    const uint8_t m1[] = {0xF0, 0x7D, 0x54, 0x15, 4, 8, 55, 0xF7, 0xF0, 0x7D, 0x54, 0x16, 6, 101, 0xF7};
+    pr.feed(m1, sizeof m1);
+    CHECK(s.fx_send[4] == 55 && s.master[MsRvTone] == 101);
+    const uint32_t rej = pr.rejected();
+    const uint8_t m2[] = {0xF0, 0x7D, 0x54, 0x15, 4, 9, 55, 0xF7};
+    pr.feed(m2, sizeof m2);
+    CHECK(pr.rejected() == rej + 1);
+}
+
+struct RvRun { bool ran = false; int stop_ms = -1; int32_t peak_wet = 0; double corr = 0; bool zero_after = true; };
+static RvRun reverb_run(int send, int size, int decay, int tone, int lofi, int seconds) {
+    auto a = make_song(false), b = make_song(false);
+    a->drum[1][DpEngine] = EngSnare;
+    a->fx_send[1] = static_cast<uint8_t>(send);
+    a->master[MsRvSize] = static_cast<uint8_t>(size);
+    a->master[MsRvDecay] = static_cast<uint8_t>(decay);
+    a->master[MsRvTone] = static_cast<uint8_t>(tone);
+    a->master[MsRvLofi] = static_cast<uint8_t>(lofi);
+    a->mix[1][MpPan] = 64;
+    auto dry = std::make_unique<TrackerEngine>(), wet = std::make_unique<TrackerEngine>();
+    auto ad = make_song(false); *ad = *a; ad->fx_send[1] = 0;
+    EngineIn in;
+    dry->init(ad.get(), b.get(), 0, in);
+    wet->init(a.get(), b.get(), 0, in);
+    EngineOut od, ow;
+    for (int i = 0; i < 64; ++i) { dry->process(in, od); wet->process(in, ow); }
+    dry->commands().push(Command{CmdType::Preview, 1, 50, 127});
+    wet->commands().push(Command{CmdType::Preview, 1, 50, 127});
+    RvRun r;
+    double sl = 0, sr = 0, slr = 0;
+    for (int i = 0; i < kSampleRate * seconds; ++i) {
+        dry->process(in, od); wet->process(in, ow);
+        if (wet->mixer().reverb_running()) r.ran = true;
+        const int32_t dl = ow.audio[0] - od.audio[0], dr = ow.audio[1] - od.audio[1];
+        sl += double(dl) * dl; sr += double(dr) * dr; slr += double(dl) * dr;
+        if (std::abs(dl) > r.peak_wet) r.peak_wet = std::abs(dl);
+        if (r.ran && r.stop_ms < 0 && !wet->mixer().reverb_running()) r.stop_ms = i * 1000 / kSampleRate;
+        if (r.stop_ms >= 0 && (ow.audio[0] != od.audio[0] || ow.audio[1] != od.audio[1])) r.zero_after = false;
+    }
+    r.corr = slr / std::sqrt(sl * sr + 1e-9);
+    return r;
+}
+
+static void test_v040_reverb() {
+    // Sends at 0: the reverb never runs, the demo plays as before.
+    {
+        auto a = make_song(true), b = make_song(false);
+        auto eng = std::make_unique<TrackerEngine>();
+        EngineIn in;
+        eng->init(a.get(), b.get(), 0, in);
+        eng->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+        EngineOut out;
+        bool ran = false;
+        for (int i = 0; i < kSampleRate * 3; ++i) { eng->process(in, out); ran |= eng->mixer().reverb_running(); }
+        CHECK(!ran);
+    }
+    const RvRun def = reverb_run(100, 64, 64, 56, 40, 8);
+    CHECK(def.ran);
+    CHECK(def.stop_ms > 300 && def.stop_ms < 6000);
+    CHECK(def.peak_wet > 20);
+    CHECK(def.zero_after);
+    CHECK(std::abs(def.corr) < 0.6);   // decorrelated stereo return
+    std::printf("  reverb default: wet peak %d LSB, L/R corr %.2f, tail stops after %d ms\n", def.peak_wet, def.corr, def.stop_ms);
+    const RvRun big = reverb_run(127, 127, 127, 127, 0, 40);
+    CHECK(big.ran && big.stop_ms > 2000 && big.stop_ms < 40000 && big.zero_after);
+    std::printf("  reverb max size/decay/bright: wet peak %d LSB, corr %.2f, stops after %d ms\n", big.peak_wet, big.corr, big.stop_ms);
+    // No limit cycles: with threshold 1 the tail must reach exactly 0 (for every
+    // tone / lo-fi corner) and the reverb then stops by itself.
+    {
+        static Reverb rv;   // 33 KB, keep it off the stack
+        for (int tone : {0, 56, 127})
+            for (int lofi : {0, 40, 127})
+                for (int decay : {0, 127}) {
+                    rv = Reverb();
+                    rv.set(127, 127, decay, tone, lofi, 1);
+                    int32_t l = 0, r = 0;
+                    int i = 0;
+                    for (; i < kSampleRate * 120; ++i) {
+                        l = r = 0;
+                        rv.process(i < 2000 ? ((i * 7919) % 60000) - 30000 : 0, l, r);
+                        if (i > 2000 && !rv.running()) break;
+                    }
+                    CHECK(!rv.running());
+                    if (rv.running()) std::printf("  reverb never settled: tone %d lofi %d decay %d\n", tone, lofi, decay);
+                }
+    }
+    const RvRun lofi = reverb_run(127, 10, 20, 0, 127, 8);
+    CHECK(lofi.ran && lofi.stop_ms > 0 && lofi.zero_after);
+    std::printf("  reverb small/dark/full lo-fi: wet peak %d LSB, stops after %d ms\n", lofi.peak_wet, lofi.stop_ms);
+}
+
+static void test_v040_leds() {
+    // One LED write per sample at most; all six are refreshed every 16 samples.
+    auto a = make_song(true), b = make_song(false);
+    auto eng = std::make_unique<TrackerEngine>();
+    EngineIn in;
+    eng->init(a.get(), b.get(), 0, in);
+    eng->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+    EngineOut out;
+    int seen[6] = {};
+    int writes = 0;
+    for (int i = 0; i < 16000; ++i) {
+        eng->process(in, out);
+        if (out.led_index >= 0) {
+            CHECK(out.led_index < 6);
+            ++seen[out.led_index];
+            ++writes;
+            CHECK(out.led_value == eng->leds()[out.led_index]);
+        }
+    }
+    for (int k = 0; k < 6; ++k) CHECK(seen[k] >= 900);   // ~1000 refreshes each in 16000 samples
+    CHECK(writes <= 16000 * 6 / 16 + 6);
+}
+
+
+// 0.4.1: W effect = reverb send for one hit.
+static void test_v041_send_fx() {
+    // (a) W on DR2 row 0, a plain hit on row 8: the applied send glides up to
+    // the W value (no jump > 128 Q15 per sample), the reverb runs, and the plain
+    // hit glides back to the knob (0).
+    {
+        auto a = make_song(false), b = make_song(false);
+        a->drum[1][DpEngine] = EngSnare;
+        a->fx_send[1] = 0;
+        a->pat_len[0] = 16;
+        set_cell(*a, 0, 1, 0, 50, 0, FxSend, 127);
+        set_cell(*a, 0, 1, 8, 50);
+        auto eng = std::make_unique<TrackerEngine>();
+        EngineIn in;
+        eng->init(a.get(), b.get(), 0, in);
+        EngineOut out;
+        for (int i = 0; i < 64; ++i) eng->process(in, out);
+        eng->commands().push(Command{CmdType::PlayPattern, 0, 0, 0});
+        const int32_t lvl = g_tables.level[a->mix[1][MpLevel]];
+        const int32_t want = (lvl * g_tables.send_law[127]) >> 12;
+        int32_t prev = 0, max_step = 0, peak = 0;
+        bool ran = false, back = false;
+        const int row = 60 * kSampleRate / (a->tempo() * 4);   // samples per row (approx.)
+        for (int i = 0; i < row * 12; ++i) {
+            eng->process(in, out);
+            const int32_t sv = eng->mixer().applied_send(1);
+            max_step = std::max(max_step, std::abs(sv - prev));
+            prev = sv;
+            if (i < row * 7) peak = std::max(peak, sv);
+            ran |= eng->mixer().reverb_running();
+            if (i > row * 9 && sv == 0) back = true;
+        }
+        CHECK(peak == want);
+        CHECK(max_step <= 128);
+        CHECK(ran);
+        CHECK(back);
+        std::printf("  W fx: send %d (Q15) on the W hit, max step %d/sample, back to the knob after the next hit\n", peak, max_step);
+    }
+    // (b) W00 with the knob at 0 changes nothing at all (bit-identical output,
+    // the reverb never starts): the dry path is untouched by the effect.
+    {
+        auto a = make_song(true), a2 = make_song(true), b = make_song(false);
+        for (int r = 0; r < 64; ++r)
+            if (a2->cells[0][1][r].note && !a2->cells[0][1][r].fx) a2->cells[0][1][r].fx = FxSend, a2->cells[0][1][r].fxv = 0;
+        auto e1 = std::make_unique<TrackerEngine>(), e2 = std::make_unique<TrackerEngine>();
+        EngineIn in;
+        e1->init(a.get(), b.get(), 0, in);
+        e2->init(a2.get(), b.get(), 0, in);
+        e1->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+        e2->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+        EngineOut o1, o2;
+        bool same = true, ran = false;
+        for (int i = 0; i < kSampleRate * 4; ++i) {
+            e1->process(in, o1); e2->process(in, o2);
+            same &= o1.audio[0] == o2.audio[0] && o1.audio[1] == o2.audio[1];
+            ran |= e2->mixer().reverb_running();
+        }
+        CHECK(same);
+        CHECK(!ran);
+    }
+    // (c) W on an IN track sets the input channel's send; CV tracks ignore W.
+    {
+        auto a = make_song(false), b = make_song(false);
+        a->pat_len[0] = 16;
+        a->mix[4][MpVcaSrc] = VcaInTrack;
+        set_cell(*a, 0, kFirstInTrack, 0, 60, 0, FxSend, 64);
+        set_cell(*a, 0, kDrumTracks, 0, 36, 0, FxSend, 127);   // CV1: no-op
+        auto eng = std::make_unique<TrackerEngine>();
+        EngineIn in;
+        in.audio_connected[0] = true;
+        in.audio[0] = 800;
+        eng->init(a.get(), b.get(), 0, in);
+        EngineOut out;
+        for (int i = 0; i < 64; ++i) eng->process(in, out);
+        eng->commands().push(Command{CmdType::PlayPattern, 0, 0, 0});
+        for (int i = 0; i < 4000; ++i) eng->process(in, out);
+        const int32_t lvl = g_tables.level[a->mix[4][MpLevel]];
+        CHECK(eng->mixer().applied_send(4) == ((lvl * g_tables.send_law[64]) >> 12));
+        CHECK(eng->mixer().applied_send(5) == 0);
+        CHECK(eng->mixer().reverb_running());
+    }
+}
+
+// 0.4.2: live mutes for the reverb return and the master output.
+static void test_v042_mutes() {
+    auto mk = [](std::unique_ptr<TrackerEngine>& e, std::unique_ptr<Song>& a, std::unique_ptr<Song>& b) {
+        a = make_song(true); b = make_song(false);
+        for (int c = 0; c < kDrumTracks; ++c) a->fx_send[c] = 90;
+        e = std::make_unique<TrackerEngine>();
+        EngineIn in;
+        e->init(a.get(), b.get(), 0, in);
+        e->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+    };
+    std::unique_ptr<TrackerEngine> e1, e2;
+    std::unique_ptr<Song> a1, b1, a2, b2;
+    EngineIn in;
+    EngineOut o1, o2;
+    // (a) Unmute commands with nothing muted change nothing (bit-identical).
+    {
+        mk(e1, a1, b1); mk(e2, a2, b2);
+        e2->commands().push(Command{CmdType::SetMute, 0, 0, 0});
+        e2->commands().push(Command{CmdType::SetMute, 1, 0, 0});
+        bool same = true;
+        for (int i = 0; i < kSampleRate * 3; ++i) {
+            e1->process(in, o1); e2->process(in, o2);
+            same &= o1.audio[0] == o2.audio[0] && o1.audio[1] == o2.audio[1];
+        }
+        CHECK(same);
+    }
+    // (b) Reverb mute: the wet part fades out in <= 6 ms while the reverb keeps
+    // running; after unmuting (and its fade) the output is bit-identical again.
+    {
+        mk(e1, a1, b1); mk(e2, a2, b2);
+        for (int i = 0; i < kSampleRate; ++i) { e1->process(in, o1); e2->process(in, o2); }
+        // reference without reverb: same song, sends 0 is not the same signal, so
+        // compare against e1 only after unmute; while muted check the return gain.
+        e2->commands().push(Command{CmdType::SetMute, 0, 1, 0});
+        bool ran = false, flag = false;
+        for (int i = 0; i < kSampleRate / 2; ++i) {
+            e1->process(in, o1); e2->process(in, o2);
+            ran |= e2->mixer().reverb_running();
+        }
+        flag = (e2->status().flags & 32) != 0;
+        CHECK(e2->mixer().reverb_muted() && flag);
+        CHECK(e2->mixer().reverb_return_applied() == 0);
+        CHECK(ran);
+        e2->commands().push(Command{CmdType::SetMute, 0, 0, 0});
+        for (int i = 0; i < 400; ++i) { e1->process(in, o1); e2->process(in, o2); }   // fade back (8 ms)
+        bool same = true;
+        for (int i = 0; i < kSampleRate * 2; ++i) {
+            e1->process(in, o1); e2->process(in, o2);
+            same &= o1.audio[0] == o2.audio[0] && o1.audio[1] == o2.audio[1];
+        }
+        CHECK(same);
+        CHECK((e2->status().flags & 32) == 0);
+    }
+    // (c) Master mute: the output fades to exactly 0 within ~6 ms (gain steps of
+    // 128/32767 per sample, no hard cut), stays 0, and comes back on unmute.
+    {
+        mk(e1, a1, b1); mk(e2, a2, b2);
+        for (int i = 0; i < kSampleRate; ++i) { e1->process(in, o1); e2->process(in, o2); }
+        e2->commands().push(Command{CmdType::SetMute, 1, 1, 0});
+        int32_t worst_ratio_jump = 0;
+        bool silent = true;
+        for (int i = 0; i < kSampleRate; ++i) {
+            e1->process(in, o1); e2->process(in, o2);
+            if (i > 300) silent &= o2.audio[0] == 0 && o2.audio[1] == 0;
+            else worst_ratio_jump = std::max<int32_t>(worst_ratio_jump, std::abs(o2.audio[0]) - std::abs(o1.audio[0]));
+        }
+        CHECK(silent);
+        CHECK(worst_ratio_jump <= 1);   // never louder than unmuted while fading
+        CHECK((e2->status().flags & 64) != 0 && e2->mixer().master_muted());
+        e2->commands().push(Command{CmdType::SetMute, 1, 0, 0});
+        for (int i = 0; i < 400; ++i) { e1->process(in, o1); e2->process(in, o2); }
+        bool same = true;
+        for (int i = 0; i < kSampleRate; ++i) {
+            e1->process(in, o1); e2->process(in, o2);
+            same &= o1.audio[0] == o2.audio[0] && o1.audio[1] == o2.audio[1];
+        }
+        CHECK(same);
+        CHECK((e2->status().flags & 64) == 0);
+    }
+    // (d) Protocol v7: SetMaster 8/9 become SetMute commands and never touch
+    // the song (not saved); 10 is rejected.
+    {
+        struct H : proto::Host {
+            Song* s; std::vector<Command> cmds;
+            Song* live() override { return s; }
+            void send(const uint8_t*, int) override {}
+            bool command(const Command& c) override { cmds.push_back(c); return true; }
+            void request_save(int) override {}
+            void request_load(int) override {}
+            void request_init(int) override {}
+            void info_fields(uint8_t& x, uint8_t& y) override { x = y = 0; }
+            void pinged() override {}
+        } h;
+        auto s = make_song(false);
+        const Song before = *s;
+        h.s = s.get();
+        proto::Protocol pr(h);
+        const uint8_t m[] = {0xF0, 0x7D, 0x54, 0x16, 8, 127, 0xF7, 0xF0, 0x7D, 0x54, 0x16, 9, 64, 0xF7,
+                             0xF0, 0x7D, 0x54, 0x16, 9, 0, 0xF7};
+        pr.feed(m, sizeof m);
+        CHECK(h.cmds.size() == 3);
+        if (h.cmds.size() == 3) {
+            CHECK(h.cmds[0].type == CmdType::SetMute && h.cmds[0].a == 0 && h.cmds[0].b == 1);
+            CHECK(h.cmds[1].type == CmdType::SetMute && h.cmds[1].a == 1 && h.cmds[1].b == 1);
+            CHECK(h.cmds[2].a == 1 && h.cmds[2].b == 0);
+        }
+        CHECK(std::memcmp(&before, s.get(), sizeof(Song)) == 0);
+        const uint32_t rej = pr.rejected();
+        const uint8_t m2[] = {0xF0, 0x7D, 0x54, 0x16, 10, 127, 0xF7};
+        pr.feed(m2, sizeof m2);
+        CHECK(pr.rejected() == rej + 1);
+    }
+    std::printf("  mutes: unmuted bit-identical, reverb/master fade in <= 6 ms, not stored in the song\n");
+}
+
 int main() {
     test_dsp();
     test_voices();
@@ -1082,6 +1614,8 @@ int main() {
     test_cv_tracks();
     test_drum_fx();
     test_panel();
+    test_slot_zones();
+    test_cv_migration();
     test_protocol();
     test_store();
     test_engine();
@@ -1092,6 +1626,13 @@ int main() {
     test_cvin_macros();
     test_migration();
     test_protocol_v4();
+    test_v040_exact();
+    test_v040_early_end();
+    test_v040_song();
+    test_v040_reverb();
+    test_v040_leds();
+    test_v041_send_fx();
+    test_v042_mutes();
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

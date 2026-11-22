@@ -9,15 +9,17 @@ dazu ein **Browser-Editor**, der das Modul über USB steuert.
   gestimmtes Bandpass-Rauschen, 2-Operator-FM „Metal“, 3-Moden-Resonator
   „Modal“, Snare/Clap.
 * **Stereo-Mixer** (Level, Pan, Drive, Tone, Mute + Master-Filter/Drive) auf
-  **Audio Out 1/2**.
+  **Audio Out 1/2**, mit einem **Lo-Fi-Stereo-Reverb** als Send-Effekt (0.4.0):
+  Send-Regler pro Kanal, Return / Size / Decay / Tone / Lo-fi.
 * **2 CV/Gate-Spuren** für die beiden analogen VCOs: kalibriertes
-  **1 V/Okt an CV Out 1/2**, Gates an **Pulse Out 1/2**, Glide/Slide.
+  **1 V/Okt an CV Out 1/2** (C0 = 0 V … H5 = 5,92 V, nur positive Spannungen),
+  Gates an **Pulse Out 1/2**, Glide/Slide.
 * **Audio In 1/2** holen die VCOs zurück in den Mix, jeweils durch einen
   **VCA**, den eine eigene **IN-Spur** spielt (Trigger, Lautstärke, Haltezeit,
-  Decay, Effekte) oder das Gate und die Velocity der CV-Spur.
+  Decay, Effekte) oder das Gate der CV-Spur.
 * **Tracker**: 16 Patterns × 64 Zeilen × **8 Spuren** (4 Drums, CV1, CV2, IN1,
-  IN2). Jeder Step hat Note, Velocity und **einen Effekt** (Parameter-Locks,
-  Ratchets, Wahrscheinlichkeit, Mikro-Delay, Gate-Länge, Slide). Werte werden
+  IN2). Jeder Step hat Note, Velocity (nicht bei CV-Spuren: ein Gate ist nur an oder aus) und **einen Effekt** (Parameter-Locks,
+  Ratchets, Wahrscheinlichkeit, Mikro-Delay, Gate-Länge, Slide, Hall-Send). Werte werden
   als **00–99** angezeigt und eingegeben. Song-Arrangement mit 32 Einträgen,
   Tempo, Swing.
 * **Performance-Modus ohne Computer**: 6 Song-Slots im Flash, Start / nächster
@@ -28,12 +30,17 @@ dazu ein **Browser-Editor**, der das Modul über USB steuert.
 > Klang, Panel, Knopf-Rückmeldung, Editor). Die Neuerungen in **0.3** (IN-Spuren,
 > CV/IN-Makros, neues Slot-Format im Flash, Fix für die Slot-Auswahl,
 > Timing-Änderungen im Audio-Kern; 0.3.1 entfernt die zweite Effektspalte von
-> 0.3.0 wieder) sind durch Host-Tests, einen
+> 0.3.0 wieder; 0.3.2: nur positive CV mit C0 = 0 V, keine CV-Velocity, neuer
+> Slot-Regler) sind durch Host-Tests, einen
 > JS↔Firmware-Abgleich und Browser-Tests gegen ein simuliertes Modul
-> abgedeckt, **liefen aber noch nicht auf Hardware**.
+> abgedeckt, **liefen aber noch nicht auf Hardware**. Das gilt auch für
+> **0.4.0–0.4.2** (Optimierungen im Audio-Kern + Lo-Fi-Reverb, Send pro Step,
+> Live-Mutes): Host-Tests, Drum-Sounds Sample für Sample gegen 0.3.2 verglichen
+> (0.4.2: ohne Mute bitgenau wie 0.4.1), CPU im Emulator gemessen; noch nicht
+> auf einem Modul.
 > Siehe [Bekannte Risiken](#bekannte-risiken).
 
-![Editor bei 1366×768: Tracker-Raster mit Spalten-Labels und Effektliste](docs/screenshot-grid-fxpicker-1366x768.png)
+![Editor bei 1366×768: Tracker-Raster mit der Tastatur-Skizze darunter](docs/screenshot-grid-keyboard-1366x768.png)
 
 English: [README.md](README.md)
 
@@ -68,13 +75,13 @@ exportieren/importieren.
 | Bereich | |
 | --- | --- |
 | Oben | Connect, Transport (Song / Pattern / Stop / nächster Part), BPM, Swing, CPU-Last des Moduls |
-| Werkzeugleiste | Songname, Flash-Slot laden/speichern, vom Modul lesen / ans Modul senden, Neu, Demo, Export/Import, Oktave, **STEP JUMP** (um wie viele Zeilen der Cursor nach einer Eingabe springt), Edit-Modus, Follow |
+| Werkzeugleiste | Songname, **SLOT n** (der Slot, den das Modul spielt; `· edited`, wenn der Editor ungespeicherte Änderungen hat), Flash-Slot laden/speichern, vom Modul lesen / ans Modul senden, Neu, Demo, Export/Import, Oktave, **STEP JUMP** (um wie viele Zeilen der Cursor nach einer Eingabe springt), Edit-Modus, Follow, **⌨** Tastatur-Skizze an/aus, Keys (Hilfe) |
 | Links | Song-Arrangement (Pattern × Wiederholungen, ▶ startet bzw. springt zu einem Eintrag), Pattern-Auswahl & -Länge, Kopieren/Einfügen/Löschen, **Effekt-Legende** für die Spur unter dem Cursor |
 | Mitte | das Tracker-Raster; darunter eine **Statuszeile**, die das Feld unter Maus oder Cursor erklärt |
 | Links unten | **Computer · Live**: die Regler Main/X/Y und die Z-Stellung des Moduls in Echtzeit |
-| Rechts, Tab **Drum voices** | vier Module im Eurorack-Stil: Engine, Zuordnungs-Tasten **MAIN** / **X**, Drehregler Decay, A, B, Tune, Vel; die rote LED leuchtet bei jedem Schlag |
-| Rechts, Tab **Mixer** | DR1–DR4, **IN1**, **IN2** (Audio-Eingänge) und Master: Level, Pan, Drive, Tone, VCA-Decay (Eingänge), Mute, Pegel, Master-Filter |
-| Rechts, Tab **CV / IN** | **CV/GATE 1, 2**: Gate-Länge, Glide, Transponierung, MAIN/X-Zuordnung · **CV RANGE**: 0-V-Note · **IN 1, 2 VCA**: Quelle (OPEN / CV GATE / IN TRACK), Decay, Hold, Drive, MAIN/X-Zuordnung, TEST |
+| Rechts, Tab **Drum voices** | vier Module im Eurorack-Stil: Engine, Zuordnungs-Tasten **MAIN** / **X**, Drehregler Decay, A, B, Tune, Vel; die rote LED leuchtet bei jedem Schlag. Jedes Modul trägt eine Frontplatte passend zur Engine (0.4.2, siehe unten) |
+| Rechts, Tab **Mixer** | DR1–DR4, **IN1**, **IN2** (Audio-Eingänge), **REVERB** und Master: Level, Pan, Drive, Tone, VCA-Decay (Eingänge), **Send** (zum Reverb), ein **MUTE**-Schalter auf jedem Streifen, auch REVERB und MASTER (0.4.2), Pegel (Spitzenwert mit ≈10 ms Anstieg, ≈300 ms Abfall und 1 s Peak-Hold-Marke), Master-Filter. REVERB: Return, Size, Decay, Tone, Lo-fi, Return-Pegel und eine LED, solange die Fahne ausklingt |
+| Rechts, Tab **CV / IN** | **CV/GATE 1, 2**: Gate-Länge, Glide, Transponierung, MAIN/X-Zuordnung · **CV RANGE**: Skala Note ↔ Spannung (C0 = 0 V … C5 = 5 V) · **IN 1, 2 VCA**: Quelle (OPEN / CV GATE / IN TRACK), Decay, Hold, Drive, MAIN/X-Zuordnung, TEST |
 
 **Drehregler:** hoch/runter ziehen (Shift = fein), Mausrad, Doppelklick
 setzt zurück, mit Fokus auch Pfeiltasten / Bild↑↓ / Pos1 / Ende.
@@ -90,19 +97,88 @@ X-Makro darauf wirkt. Die Zuordnung wird im Song gespeichert.
 
 ![Tab CV / IN](docs/screenshot-cvin-1366x768.png)
 
+### Frontplatten der Drum-Module (0.4.2)
+
+![Alle sechs Frontplatten und der Mixer](docs/screenshot-voices-mixer-montage.png)
+
+Der Tab Drum voices sieht aus wie eine kleine Eurorack-Reihe: Jedes
+Drum-Modul wechselt seine Frontplatte, wenn eine andere Engine gewählt wird.
+Nur die Optik ändert sich (Platte, Beschriftung, Reglerkappen); Regler, ihre
+Positionen und ihre Funktion sind bei jeder Engine gleich. Auf den Platten
+stehen keine Logos oder Markennamen; jede ist von einem echten Modul auf
+ModularGrid inspiriert:
+
+| Engine | Frontplatte | Inspiriert von |
+| --- | --- | --- |
+| Kick | schwarz, weiße fette schmale Versalien, rote Linie unter dem Titel, silberne Knöpfe mit rotem Zeiger, abklingende Sinuslinie am Namensschild | [Befaco Kickall](https://modulargrid.net/e/befaco-kickall) |
+| Pluck | helles Aluminium, ruhige dunkle Grotesk, große weiße Knöpfe, drei farbige Punkte, gestrichelte Führungslinien | [Mutable Instruments Rings](https://modulargrid.net/e/mutable-instruments-rings) |
+| Noise | cremefarben mit dünnen schwarzen Kritzel-Linien (Spiralen, Pfeile, Zickzack), kursive Kleinbuchstaben, blaue Knöpfe | [Make Noise Wogglebug](https://modulargrid.net/e/make-noise-wogglebug) |
+| Metal | gebürstetes Aluminium, Serifen-Kapitälchen, schwarze Knöpfe mit weißem Strich | [Mannequins Mangrove](https://modulargrid.net/e/mannequins-mangrove) |
+| Modal | tiefes Lila mit feinem Punktraster, Lavendel-Schrift, kleine schwarze Knöpfe | [Noise Engineering Basimilus Iteritas Alter](https://modulargrid.net/e/noise-engineering-basimilus-iteritas-alter) |
+| Snare | silberweiß, schwarze fette kursive Versalien, gerändelte schwarze Knöpfe, schwarzes Namensschild | [Tiptop Audio SD909](https://modulargrid.net/e/tiptop-audio-sd909) |
+
+Der goldene (Song-Wert) und der rote Bogen (Live-Makro) sind auf allen Platten
+gleich; Schriftgrößen und Farben sind auf Kontrast geprüft (Beschriftung ≥ 9:1,
+Werte ≥ 5:1, der rote Live-Wert auf den hellen Platten ≥ 5:1). Mixer, CV / IN
+und der Rest des Editors behalten den Workshop-System-Look. Die dekorativen
+Mini-Buchsen unten an den Drum-Modulen und Mixer-Streifen sind weg (sie taten
+nichts); der Tab CV / IN behält seine Buchsen-Beschriftung, weil sie die
+echten Buchsen benennt. Mehr:
+[docs/screenshot-voices-models-1366x768.png](docs/screenshot-voices-models-1366x768.png).
+
+### Lo-Fi-Reverb (0.4.0)
+
+![Mixer-Tab mit Send-Reglern und dem REVERB-Modul](docs/screenshot-mixer-1366x768.png)
+
+Ein absichtlich sparsamer, körniger Stereo-Hall im Stil früher Digitalhalls,
+der neben den Drums auf dem Modul läuft. Jeder Mixer-Kanal hat einen
+**Send**-Regler (nach Level und Mute; quadratische Kennlinie, 50 % ≈ −12 dB).
+Der Return geht vor Master-Filter und -Drive in die Summe.
+
+| Regler | Bereich | Wirkung |
+| --- | --- | --- |
+| Return | 0–100 % (≈71 % = 0 dB, 100 % = +6 dB) | Hall-Anteil in der Summe |
+| Size | 40–100 % | Länge der vier Delay-Lines (71–125 ms bei 100 %); beim Drehen biegt die Tonhöhe der Fahne kurz wie bei einem Band |
+| Decay | 0,3–9 s | Zeit bis −60 dB |
+| Tone | dunkel … hell | Dämpfung in der Fahne |
+| Lo-fi | sauber … rau | wirft untere Bits der Fahne weg (16 → 9 Bit), leichtes Leiern, ab 50 % Sample-and-Hold-Ausgabe (Aliasing) |
+
+Innen: Die Send-Summe wird auf **16 kHz** gemittelt, läuft durch zwei
+Allpass-Diffusoren in ein **Feedback-Delay-Netz mit 4 Lines** (Hadamard-Matrix,
+je ein Dämpfungs-Tiefpass und eine Abklingverstärkung, 16-Bit-Lines); links
+und rechts greifen verschiedene Lines ab, deshalb ist das Stereobild breit
+(L/R-Korrelation des Returns ≈ −0,2). Wenn nichts hineingeht und die Fahne
+unter der Auflösung des Ausgangs liegt, schaltet sich der Hall ab (keine CPU,
+exakt still). Songs aus älteren Versionen laden mit allen Sends auf 0 und
+klingen genau wie vorher. Zum Anhören:
+[docs/audio/demo_dry.wav](docs/audio/demo_dry.wav) und
+[docs/audio/demo_reverb.wav](docs/audio/demo_reverb.wav) (Demo-Song trocken und mit
+etwas Send auf der Kick und mehr auf Drums 2–4; vom Firmware-Code auf dem Host
+gerendert).
+
+**Mutes (0.4.2).** Jeder Mixer-Streifen hat einen **MUTE**-Schalter. DR1–DR4,
+IN1 und IN2 schalten ihren Kanal (samt Send) stumm; das sind Song-Werte und
+werden wie bisher im Slot gespeichert. **REVERB** schaltet nur den Return
+stumm: Der Hall läuft weiter, beim Aufheben ist die noch klingende Fahne
+wieder da. **MASTER** schaltet den ganzen Ausgang stumm. Beide blenden in ≈ 5 ms
+(kein Knacken), sind **Live-Schalter und werden nicht im Song gespeichert**
+(ein Slot, der auf der Bühne stumm hochfährt, wäre eine Falle) und sind nach
+dem Einschalten aus. Sie brauchen Firmware 0.4.2 (Protokoll 7); mit älterer
+Firmware sind sie ausgegraut. Ohne Mute ist der Ausgang bitgenau wie bei 0.4.1.
+
 ### Das Raster
 
-Jede Spur hat kleine Spalten-Labels: **NOTE VEL FX** (IN-Spuren:
-**TRIG LVL FX**). Jeder Step hat einen Effekt. Zeilen und Patterns zählen ab 01.
+Jede Spur hat kleine Spalten-Labels: **NOTE VEL FX** (CV-Spuren: **NOTE FX**,
+IN-Spuren: **TRIG LVL FX**). Jeder Step hat einen Effekt. Zeilen und Patterns zählen ab 01.
 Alle Werte sind zwei Dezimalziffern, **00–99** (intern wo nötig 0–127); `..`
 heißt „Standard“. Die Schriftgröße des Rasters passt sich dem Fenster an, damit
-alle 8 Spuren ohne seitliches Scrollen passen (12 px bei 1366×768, 16 px bei
+alle 8 Spuren ohne seitliches Scrollen passen (13 px bei 1366×768, 16 px bei
 1920×1080).
 
 | Spur | NOTE / TRIG | VEL / LVL |
 | --- | --- | --- |
 | Drum 1–4 | Tonhöhe, `OFF` würgt ab | Anschlagstärke (`..` = 79) |
-| CV1, CV2 | Tonhöhe an CV Out, Gate an Pulse Out, `OFF` = Gate aus | Lautstärke des IN-VCA, **nur wenn dieser Eingang dem CV-Gate folgt** (sonst ist das Label durchgestrichen) |
+| CV1, CV2 | Tonhöhe an CV Out (**C-0 … B-5 = 0 … 5,92 V**, die Oktavziffer ist die Spannung), Gate an Pulse Out, `OFF` = Gate aus | – (keine Velocity: ein IN-VCA, der dem CV-Gate folgt, öffnet voll, die Lautstärke kommt vom Mixer) |
 | IN1, IN2 | jede Notentaste = Trigger (Anzeige `TRG`), `OFF` schließt | VCA-Lautstärke (`..` = voll) |
 
 Ein Trigger in einer IN-Spur stellt die VCA-Quelle dieses Eingangs auf IN TRACK
@@ -123,6 +199,38 @@ nennt den Effekt unter dem Cursor.
 | `R` Ratchet | alle | 02–08 Wiederholungen in der Zeile |
 | `P` Wahrscheinlichkeit | alle | Chance in %, 00–99 |
 | `K` Verzögerung | alle | n/16 Zeile später, 01–15 |
+| `W` Reverb-Send | Drum, IN | Hall-Send für diesen Schlag, 00–99 (0.4.1) |
+
+**`W` (Hall-Send pro Schlag, Firmware 0.4.1).** `W` („wet“; R ist schon der
+Ratchet) setzt den Reverb-Send des Kanals für diesen Schlag statt des
+Send-Reglers im Mixer, mit derselben Kennlinie (50 ≈ −12 dB, 99 = voll, nach
+Level und Mute). Die ganze Ausklingphase des Schlags behält diesen Send bis
+zum nächsten Schlag auf derselben Spur; ein Schlag ohne `W` nimmt wieder den
+Regler. Ratchets wiederholen ihn, ein von `P` übersprungener Step ändert
+nichts. Der Wechsel gleitet in höchstens ≈5 ms, deshalb knackst nichts im
+Hall. Der trockene Klang bleibt unberührt. CV-Spuren sind nicht im Mix, dort
+bietet der Editor `W` nicht an (die Firmware ignoriert es). Firmware 0.4.0 und
+älter ignorieren den Buchstaben, Songs bleiben in beide Richtungen kompatibel.
+
+**CV-Spannungen.** CV Out ist 1 V/Oktave mit **C0 = 0 V**: `C-0` = 0 V, `C-1` =
+1 V, `A-2` = 2,75 V, bis `B-5` (H5) = 5,917 V. Es gibt nur positive Spannungen
+(die VCOs des Workshop Systems folgen unter 0 V nicht), deshalb endet die
+Oktavwahl auf CV-Spuren bei 5, und Noten über H5 werden eine Oktave tiefer
+gelegt. Transponieren (*Transp* der Spur, CV In 1), das 0…5,92 V verlassen
+würde, wird ebenfalls oktavweise zurückgefaltet; CV Out wird also nie negativ.
+Songs älterer Versionen werden umgewandelt: CV-Noten behalten ihre Spannung (mit
+der alten Voreinstellung „0-V-Note = C2“ wird aus `C-2` ein `C-0`), Noten, die
+früher bei 0 V oder 6 V klebten, rücken oktavweise in den Bereich, und
+CV-Velocities fallen weg.
+
+**Tastatur-Skizze.** Unter dem Raster zeichnet der Editor die Computertastatur
+(an/aus mit **⌨**, auch im *Keys*-Dialog): jede Taste zeigt ihren Buchstaben und
+die Note, die sie in der aktuellen Oktave für die Spur unter dem Cursor spielt
+(IN-Spuren: `TRG`). `1` (rot) ist OFF, `ß` / `´` (silber; US: `-` / `=`)
+wechseln die Oktave. Die Tasten werden nach Position erkannt; meldet der
+Browser ein deutsches Layout, beschriftet die Skizze QWERTZ, der Knopf
+QWERTY / QWERTZ stellt die Beschriftung von Hand um. Die gedrückte Taste
+leuchtet kurz auf.
 
 **Tasten** (*Keys* in der App zeigt alle): Klaviatur auf `Y/Z S X D C V…`
 (untere Oktave; die Tasten werden nach Position erkannt, deutsches Layout
@@ -134,7 +242,16 @@ in den VEL- und Wert-Spalten (eine Ziffer, dann eine zweite für zwei Stellen:
 Pattern, `Enter` in NOTE/VEL spielt den Song, `Strg+C / Strg+V` kopiert/fügt
 eine Spur ein.
 
-**Ältere Firmware:** Mit Firmware 0.2 zeigt der Editor einen Hinweis, blendet
+**Slot-Wechsel am Modul.** Wechselt der Slot-Regler am Modul (Z oben) auf
+einen anderen Song, merkt der Editor das (Song-Wechselzähler im Status) und
+liest den neuen Song. Hatte der Editor **ungespeicherte Änderungen** (die
+SLOT-Anzeige sagt `· edited`), werden sie vorher im Browser gesichert, und ein
+Hinweis sagt das; **Restore** holt sie zurück (danach *Send to module* oder
+*Save to module*). Nichts geht stillschweigend verloren.
+
+**Ältere Firmware:** Mit Firmware 0.3.1 funktioniert alles; der Editor legt die
+CV-Noten in C0–H5, setzt die 0-V-Note des Moduls auf C0 und empfiehlt das Update
+(Slot-Regler-Zonen, Faltung von CV In 1). Mit Firmware 0.2 zeigt der Editor einen Hinweis, blendet
 die IN-Spuren abgedunkelt ein (werden nicht gesendet) und wandelt Songs vom
 Modul beim Lesen um. Mit Firmware 0.3.0 (die noch eine zweite Effektspalte
 hatte) funktioniert alles; der Editor löscht beim Schreiben eines Steps dessen
@@ -161,17 +278,17 @@ FPU), Hüllkurven und Koeffizienten mit Control-Rate (alle 8 Samples).
 | --- | --- |
 | Audio Out 1/2 | Stereo-Mix L/R |
 | Audio In 1/2 | Mixer-Kanäle **IN1 / IN2** (z. B. die VCOs) durch einen VCA, gespielt von der IN-Spur oder dem CV-Gate |
-| CV Out 1/2 | 1 V/Okt der CV-Spuren 1/2 (kalibriert) |
+| CV Out 1/2 | 1 V/Okt der CV-Spuren 1/2 (kalibriert), C0 = 0 V … H5 = 5,92 V |
 | Pulse Out 1/2 | Gates der CV-Spuren 1/2 |
 | Pulse In 1 | Clock-Eingang, 1 Puls = 1 Zeile (ersetzt die interne Clock, solange gesteckt) |
 | Pulse In 2 | Reset |
-| CV In 1 | Transponierung der CV-Spuren, 1 V/Okt |
+| CV In 1 | Transponierung der CV-Spuren, 1 V/Okt (oktavweise gefaltet, nie unter 0 V) |
 | CV In 2 | Modulation des Filter-Makros |
 
 | Z | Main | X | Y |
 | --- | --- | --- | --- |
 | **Mitte** (PERFORM) | Decay-Makro (zugeordnete Voices), CV-Gate-Länge, IN-VCA-Decay | Farbe-Makro (Parameter A, zugeordnete Voices), CV-Glide, IN-Drive | Master-Filter LP ↔ HP |
-| **Oben** (SELECT) | Song-Slot 1–6 | Tempo 40–240 | Swing 50–75 % |
+| **Oben** (SELECT) | Song-Slot: der Regelweg wird auf die belegten Slots aufgeteilt (2 → 50 %, 3 → 33 / 66 %) | Tempo 40–240 | Swing 50–75 % |
 | **Unten** (tastend) | kurz: Start / nächster Part · 0,8 s halten: Stop | | |
 
 Tempo, Swing und Makros nutzen Soft-Takeover (der Regler greift erst, wenn er
@@ -188,8 +305,10 @@ den aktuellen Wert überfährt; eine LED blinkt solange). LED-Bedeutungen:
   CRC-geprüft; Slots von 0.3.0 und 0.1/0.2 werden beim Laden umgewandelt), geschrieben von Core 1
   Sektor für Sektor. Die Firmware läuft komplett aus dem RAM
   (`copy_to_ram`), deshalb läuft das Audio beim Speichern weiter.
-* **CPU:** 192 MHz. ≈ 50 % des Budgets im teuersten Sample beim Demo-Song (nur
-  Engine, geschätzt), ≈ 93 % in einem absichtlich extremen Worst Case.
+* **CPU:** 192 MHz. Nur Engine, im Emulator: Demo-Song ≈ 36 % im Schnitt / 46 %
+  im teuersten Sample (mit Reverb 42 % / 54 %), Leerlauf 21 %; ein absichtlich
+  extremer Worst Case 76 % / 91 % (mit Reverb auf allen sechs Kanälen voll
+  aufgedreht 83 % / 97 %).
   [docs/CPU_BUDGET.md](docs/CPU_BUDGET.md). Das Modul meldet seine gemessene
   Last an den Editor.
 
@@ -200,27 +319,44 @@ mit g++ und `node --test`).
 
 ## Was fehlt (noch)
 
-* kein Delay/Reverb (das CPU-Budget ging an die Stimmen);
+* nur ein Send-Effekt (der Lo-Fi-Reverb, kein Delay); der Reverb hat keinen
+  Regler am Panel und keinen Effekt-Buchstaben pro Step;
 * nur USB-**Device**-Modus (keine USB-MIDI-Keyboards direkt am Modul);
 * externe Clock fest **1 Puls = 1 Zeile**;
 * Decay-/Farbe-Makros wirken auf neue Anschläge, nicht auf klingende Noten;
 * die Reglerstellungen des Moduls werden im Editor angezeigt, lassen sich dort aber nicht verstellen (es sind echte Potis);
 * kein Mute/Solo im Raster (Mixer-Mute benutzen), kein Undo;
-* Song-Wechsel am Panel nur zwischen den 6 gespeicherten Slots;
+* Song-Wechsel am Panel nur zwischen den gespeicherten Slots;
 * der Eigenverbrauch von ComputerCard ist geschätzt, nicht gemessen.
 
 ## Bekannte Risiken
 
 * 0.1 und 0.2 wurden auf Hardware bestätigt. **0.3** wurde nur simuliert
-  getestet: die IN-VCAs und die CV-Velocity mit echtem Audio, das Umwandeln
+  getestet: die IN-VCAs mit echtem Audio, **die CV-Spannungen von 0.3.2
+  (C0 = 0 V, das Falten um Oktaven, CV In 1 an den Bereichsgrenzen) an echten
+  VCOs, die Zonen des Slot-Reglers und ihre Hysterese mit einem echten Poti, die
+  Slot-LEDs, das Mitlesen eines Slot-Wechsels mit echtem USB-Timing,** das Umwandeln
   echter 0.2- und 0.3.0-Slots, das Schreiben der Slots (9 Sektoren) bei laufendem
   Audio, der Fix für die Slot-Auswahl am Panel und die Timing-Änderungen im
   Audio-Kern (ein Ratchet-/Gate-Ereignis pro Sample, Mixer-/VCA-Updates in
   vollen Samples verschoben). Die Langzeitstabilität bei 192 MHz / 1,15 V
   braucht noch mehr Praxis.
-* Die RAM-Belegung liegt bei ≈ 59 % (zwei Song-Puffer à 32 KB; 0.3.0: ≈ 72 %).
-* Der extreme CPU-Worst-Case liegt nahe am Limit. Bei Knacksern die
-  CPU-Anzeige im Editor prüfen.
+* **0.4.2** ist nicht auf Hardware getestet: die REVERB-/MASTER-Mutes und ihre
+  Blenden an echten Ausgängen; die neuen Frontplatten sind nur in Headless
+  Chrome geprüft (1366×768 und 1920×1080, ohne Scrollen), nicht in anderen
+  Browsern oder auf HiDPI-Bildschirmen.
+* **0.4.0/0.4.1** ist nicht auf Hardware getestet: der Hall-Send pro Step `W`, Klang und Pegel des Reverbs an
+  echten Ausgängen, seine CPU-Last zusammen mit dem Eigenverbrauch von
+  ComputerCard und die Änderungen im Audio-Kern (Anschläge starten 1 Sample
+  nach dem Trigger, Modal 2; Ereignisse werden auf benachbarte Samples
+  verteilt, im Worst Case ≤ 7 Samples = 0,15 ms; Stimmen enden, sobald sie unter
+  der Ausgangsauflösung liegen; LEDs eine pro Sample; CV nur bei Änderung).
+* Die RAM-Belegung liegt bei ≈ 70 % (0.3.2: 60 %; die Delay-Lines des Reverbs
+  belegen ≈ 17 KB).
+* Der extreme CPU-Worst-Case liegt nahe am Limit (mit vollem Reverb auf allen
+  Kanälen erreichen einzelne Samples ≈ 97 % des Engine-Budgets, ohne den
+  Eigenverbrauch von ComputerCard); normale Songs haben viel Luft. Bei
+  Knacksern die CPU-Anzeige im Editor prüfen und Sends/Decay zurücknehmen.
 * Speichern überschreibt den Slot. Fällt dabei der Strom aus, ist dieser Slot
   danach leer (CRC), nie halb kaputt; andere Slots bleiben erhalten.
 * Braucht einen Chromium-Browser (WebMIDI mit SysEx).

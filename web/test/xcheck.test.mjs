@@ -53,10 +53,14 @@ test('single edits are applied by the firmware parser', { skip }, () => {
     msg.setCell(3, 1, 10, { note: 62, vel: 90, fx: 0x52, fxv: 3 }),
     msg.setTempo(171), msg.setSwing(63), msg.setDrum(2, 0, 4), msg.setMix(4, 1, 10),
     msg.setEntry(5, 9, 3), msg.setSongLen(6), msg.setPatLen(7, 48), msg.setZeroNote(24),
+    // CV cell from an old editor: velocity dropped, note folded into C0..B5 (both sides).
+    [0xf0, 0x7d, 0x54, 0x10, 2, 4, 5, 100, 80, 0, 0, 0xf7],
   ];
   s.setCell(3, 1, 10, { note: 62, vel: 90, fx: 0x52, fxv: 3 });
   s.tempo = 171; s.swing = 63; s.setDrum(2, 0, 4); s.setMix(4, 1, 10);
-  s.setEntry(5, 9, 3); s.songLen = 6; s.setPatLen(7, 48); s.cvZero = 24;
+  s.setEntry(5, 9, 3); s.songLen = 6; s.setPatLen(7, 48); // SetZeroNote is ignored since 0.3.2 (C0 = 0 V)
+  s.setCell(2, 4, 5, { note: 100, vel: 80, fx: 0, fxv: 0 });
+  assert.deepEqual(s.getCell(2, 4, 5), { note: 76, vel: 0, fx: 0, fxv: 0 });
   const back = roundTrip(stream);
   assert.deepEqual(raw(back), raw(s));
   assert.equal(back.header.length, K.headerBytes);
@@ -130,4 +134,41 @@ test('v3/v4: IN tracks, CV/IN macro routing and Panel v3 match the firmware', { 
     assert.equal(m.effInDecay[c], effectiveIn(s, m.macros, c, 4), `in decay ${c}`);
     assert.equal(m.effInDrive[c], effectiveIn(s, m.macros, c, 2), `in drive ${c}`);
   }
+});
+
+test('v6: reverb sends and master reverb params round-trip through the firmware parser', { skip }, async () => {
+  const { RV } = await import('../js/protocol.js');
+  const s = new Song();
+  const stream = [msg.setSend(0, 20), msg.setSend(3, 127), msg.setSend(5, 64),
+    msg.setMaster(RV.return, 110), msg.setMaster(RV.size, 5), msg.setMaster(RV.decay, 127),
+    msg.setMaster(RV.tone, 0), msg.setMaster(RV.lofi, 99)];
+  s.setSend(0, 20); s.setSend(3, 127); s.setSend(5, 64);
+  s.setMaster(RV.return, 110); s.setMaster(RV.size, 5); s.setMaster(RV.decay, 127);
+  s.setMaster(RV.tone, 0); s.setMaster(RV.lofi, 99);
+  const back = roundTrip(stream);
+  assert.deepEqual(raw(back), raw(s));
+  assert.equal(back.send(3), 127);
+});
+
+test('v6: an old header (fx version 0) is migrated the same way on both sides', { skip }, async () => {
+  const { OFF, RV_DEFAULTS, RV } = await import('../js/protocol.js');
+  const old = demoSong();
+  // What a 0.3.2 editor/firmware would send: reserved bytes 0, master 3..7 junk.
+  old.header.fill(0, OFF.fxSend, OFF.fxVer + 1);
+  old.header[OFF.fxSend + 2] = 99;              // stray byte must not become a send
+  for (let i = 0; i < 5; i++) old.header[OFF.master + 3 + i] = 7;
+  const back = roundTrip([msg.setHeader(old)]);
+  const js = Song.fromJSON(old.toJSON());
+  for (const s of [back, js]) {
+    for (let c = 0; c < K.channels; c++) assert.equal(s.send(c), 0);
+    RV_DEFAULTS.forEach((v, i) => assert.equal(s.master(RV.return + i), v));
+    assert.equal(s.fxVer, 1);
+  }
+  assert.deepEqual(Buffer.from(back.header), Buffer.from(js.header));
+});
+
+test('v7: live mutes go through the firmware parser without touching the song', { skip }, () => {
+  const s = demoSong();
+  const back = roundTrip([...uploadMessages(s), msg.setLiveMute('reverb', true), msg.setLiveMute('master', true), msg.setLiveMute('master', false)]);
+  assert.deepEqual(raw(back), raw(s));
 });

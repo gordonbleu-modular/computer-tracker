@@ -109,15 +109,16 @@ h2:first-child { margin-top: 0; }
 .grid .l i { font-style: normal; font-size: .68em; letter-spacing: .02em; color: var(--dim); }
 .grid .l.n { width: 3ch; } .grid .l.v { width: 2ch; margin-left: .7ch; }
 .grid .l.x { width: 3ch; margin-left: .7ch; }
-.grid .l.nv i { text-decoration: line-through; opacity: .6; }
 .grid .num { width: calc(2ch + 6px); text-align: right; padding-right: 4px; color: var(--dim); flex: none; }
 /* track = NOTE VEL FX. border-box: width = 9.4 characters + padding (6px) + border (1px).
    The font size is fitted to the width in app.js (fitGrid). */
 .grid .trk { width: calc(9.4ch + 7px); flex: none; padding: 0 3px; border-left: 1px solid #34363b; }
 .grid .trk.open { background: #ffffff06; }
+/* CV/gate tracks: NOTE FX only (a gate is on/off, no velocity; 0.3.2) */
+.grid .trk.k-cv { width: calc(6.7ch + 7px); }
+.grid .k-cv .f.v, .grid .k-cv .l.v { display: none; }
 .grid .f { display: inline-block; }
 .grid .f.v { margin-left: .7ch; } .grid .f.xl { margin-left: .7ch; }
-.grid .f.v.nv { opacity: .4; }
 .grid.oldfw .k-in { opacity: .35; }
 .grid .r:nth-child(4n+2) { background: #17181b; }
 .grid .r:nth-child(4n+2) .num { color: var(--silver); }
@@ -201,8 +202,18 @@ h2:first-child { margin-top: 0; }
 /* mixer */
 .module.strip { width: 6rem; }
 .module.strip.master { width: 7.2rem; }
+/* 0.4.0: send knob + reverb module; strips share the width */
+#mixer .module.strip { flex: 1 1 0; min-width: 0; }
+#mixer .module.strip.master, #mixer .module.strip.reverb { flex: 1.15 1 0; }
+#mixer .module.strip .knob { min-width: 0; }
+#mixer .meter { height: clamp(48px, 9vh, 110px); }
+.knob.send .kval-arc { stroke: #c9ccd1; }
+.knob.send .klabel { color: var(--gold); }
+.module.reverb .mtitle b { color: var(--gold); }
+.module.reverb.off { opacity: .55; }
 .meter { width: 10px; height: clamp(60px, 13vh, 130px); background: #0b0b0c; border: 1px solid #000; position: relative; margin: 3px 0 4px; display: inline-block; }
-.meter i { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: linear-gradient(to top, var(--gold) 0 70%, #ff8a2a 85%, var(--red)); transition: height .05s; }
+.meter i { position: absolute; inset: 0; background: linear-gradient(to top, var(--gold) 0 70%, #ff8a2a 85%, var(--red)); clip-path: inset(100% 0 0 0); }
+.meter b.pk { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; margin-bottom: -1px; background: #f2f2f2; opacity: 0; pointer-events: none; }
 .meters { display: flex; gap: 3px; }
 button.mute { font-size: 0.75rem; padding: 2px 6px; margin-top: 4px; }
 button.mute.on { color: var(--text); }
@@ -243,3 +254,184 @@ dialog td { padding: 2px 10px 2px 0; } dialog td:first-child { color: var(--gold
 @media (max-width: 1400px) { .readout { min-width: 15rem; } .topbar .group { gap: 4px; } .layout { grid-template-columns: 14.2rem minmax(380px, 1fr) calc(44rem + 46px); }
   .entry { gap: 2px; padding: 1px 0; } .entry .idx { width: 15px; } .entry select { padding: 1px 1px; }
   .entry input { width: 32px; } .entry button { padding: 0 4px; } }
+
+/* CV RANGE module: voltage scale */
+.cvscale { display: flex; flex-direction: column; gap: 1px; margin: 4px 0; font-size: .72rem; }
+.cvscale .cvrow { display: flex; justify-content: space-between; padding: 1px 6px; border-left: 2px solid var(--gold2); background: #ffffff05; }
+.cvscale b { color: var(--gold); font-weight: normal; }
+.cvscale span { color: var(--silver); }
+
+/* keyboard sketch (0.3.2): docked under the grid and in the Keys dialog */
+.kbd { flex: none; container-type: inline-size; border-top: 1px solid var(--gold2); background: var(--panel2); padding: 3px 6px 5px; font-size: 10.5px; }
+.kbd-head { display: flex; align-items: center; gap: 8px; color: var(--silver); margin-bottom: 3px; white-space: nowrap; overflow: hidden; }
+.kbd-head .kbd-name { color: var(--gold); letter-spacing: .15em; }
+.kbd-head #kbdTitle { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.kbd-head button { padding: 0 6px; font-size: 10px; }
+.kb-rows { --kw: min(4.2em, calc((100cqw - 2px) / 14.4)); display: flex; flex-direction: column; gap: 2px; }
+.kb-row { display: flex; gap: 2px; }
+.kb-key { width: calc(var(--kw) - 2px); height: calc(var(--kw) * 0.74); border-radius: 3px; border: 1px solid #000; background: #1a1b1e; display: flex; flex-direction: column; justify-content: space-between; padding: 1px 3px; box-sizing: border-box; color: #555; }
+.kb-key b { font-weight: normal; font-size: 1em; line-height: 1; }
+.kb-key i { font-style: normal; font-size: .82em; line-height: 1; text-align: right; }
+.kb-key.note { background: linear-gradient(#d9d6cc, #b9b5aa); color: #111; }
+.kb-key.note i { color: #6a4d00; }
+.kb-key.note.sharp { background: linear-gradient(#2b2c30, #141517); color: #eee; border-color: #555; }
+.kb-key.note.sharp i { color: var(--gold); }
+.kb-key.off { background: #2a1416; color: #eee; border-color: var(--red); }
+.kb-key.off i { color: var(--red); }
+.kb-key.octdown, .kb-key.octup { background: #2a2b2f; color: var(--silver); border-color: var(--silver2); }
+.kb-key.octdown i, .kb-key.octup i { color: var(--silver); }
+.kb-key.press { outline: 2px solid var(--red); box-shadow: 0 0 6px var(--redglow); }
+.kbd-help { font-size: 11px; padding: 4px 0 6px; container-type: inline-size; width: 560px; max-width: 100%; }
+.kbd-help .kb-title { color: var(--gold); margin-bottom: 4px; }
+#btnKbd.kbon { border-color: var(--gold); color: var(--gold); }
+
+/* slot the module plays (0.3.2) */
+.pill.slotnow { color: var(--silver); white-space: nowrap; }
+.pill.slotnow.on { color: var(--text); border-color: var(--gold2); }
+.pill.slotnow b { color: var(--gold); font-weight: normal; }
+.pill.slotnow.pending .led { animation: blink .5s steps(2) infinite; background: var(--red); }
+
+/* ---------------------------------------------------------------------------
+   0.4.2: drum module faceplates per engine (look only: same knobs, same
+   places). Each one borrows the feel of a real Eurorack panel, without logos:
+   Kick  - black panel, white condensed caps, silver knobs, red accents
+   Pluck - light aluminium, quiet dark sans, big white knobs, coloured dots
+   Noise - cream panel with black line doodles, italic labels, blue knobs
+   Metal - brushed aluminium, serif small caps, black knobs with white line
+   Modal - deep purple, lavender print, small black knobs
+   Snare - silver-white, black bold italic caps, knurled black knobs
+   ------------------------------------------------------------------------- */
+.module.drum .plate { margin-top: 5px; width: 100%; text-align: center; font-size: 0.833rem; letter-spacing: .16em; padding: 3px 0 1px; min-height: 1.5em; }
+.module.drum .klabel, .module.drum .msub, .module.drum .plate, .module.drum .mtitle b { transition: color .15s; }
+.module.drum button.audition { min-width: 4.6rem; }
+
+/* Kick */
+.module.p-kick {
+  background:
+    linear-gradient(90deg, #0b0b0c, #151517 50%, #0a0a0b);
+}
+.p-kick .mtitle { border-bottom: 2px solid #e2231a; }
+.p-kick .mtitle b, .p-kick .klabel, .p-kick .plate { font-family: "Roboto Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif; font-stretch: condensed; font-weight: 700; color: #fff; }
+.p-kick .klabel { font-size: 0.833rem; letter-spacing: .06em; }
+.p-kick .msub { color: #a9abb0; }
+.p-kick .plate { border-top: 1px solid #fff; font-size: 1rem; letter-spacing: .22em; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 30'%3E%3Cpath d='M2 15 C6 -8 10 38 14 15 S22 0 26 15 S34 26 38 15 S46 6 50 15 S58 21 62 15 S70 11 74 15 S82 17 86 15 S94 14 118 15' fill='none' stroke='%23f4f4f4' stroke-width='1.3' stroke-opacity='.55'/%3E%3C/svg%3E") left 2px center / 30% 70% no-repeat, url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 30'%3E%3Cpath d='M2 15 C6 -8 10 38 14 15 S22 0 26 15 S34 26 38 15 S46 6 50 15 S58 21 62 15 S70 11 74 15 S82 17 86 15 S94 14 118 15' fill='none' stroke='%23f4f4f4' stroke-width='1.3' stroke-opacity='.55'/%3E%3C/svg%3E") right 2px center / 30% 70% no-repeat; }
+.p-kick .ktick { stroke: #f4f4f4; }
+.p-kick .kskirt { fill: #2a2b2e; stroke: #000; }
+.p-kick .kptr { stroke: #e2231a; }
+
+/* Pluck */
+.module.p-pluck {
+  background:
+    radial-gradient(circle, #e9473b 0 2.6px, transparent 3.2px) calc(50% - 12px) 4px / 9px 9px no-repeat,
+    radial-gradient(circle, #f5b335 0 2.6px, transparent 3.2px) 50% 4px / 9px 9px no-repeat,
+    radial-gradient(circle, #3aa86b 0 2.6px, transparent 3.2px) calc(50% + 12px) 4px / 9px 9px no-repeat,
+    repeating-linear-gradient(180deg, #8a8b88 0 2px, transparent 2px 5px) 30% 62% / 1px 18% no-repeat,
+    repeating-linear-gradient(180deg, #8a8b88 0 2px, transparent 2px 5px) 70% 62% / 1px 18% no-repeat,
+    linear-gradient(90deg, #cfcfca, #dcdcd7 50%, #cbcbc6);
+  box-shadow: inset 1px 0 #f0f0ec, inset -1px 0 #9a9a95;
+}
+.p-pluck .mtitle { border-bottom: 1px solid #6e6f6c; }
+.p-pluck .mtitle b, .p-pluck .klabel, .p-pluck .plate, .p-pluck .msub { font-family: "Helvetica Neue", "Inter", Arial, sans-serif; color: #2a2b2c; }
+.p-pluck .mtitle b { font-weight: 400; letter-spacing: .1em; }
+.p-pluck .klabel { font-weight: 600; }
+.p-pluck .msub { color: #4c4d4e; }
+.p-pluck .kvalue { color: #4a4b4c; }
+.p-pluck .plate { font-size: 1rem; letter-spacing: .12em; font-weight: 300; color: #1f2021; text-transform: lowercase; }
+.p-pluck .ktick { stroke: #5b5c5d; }
+.p-pluck .ktrack { stroke: #3a3b3c; }
+.p-pluck .kskirt { fill: #f6f6f3; stroke: #8e8f8a; }
+.p-pluck .kcap { fill: url(#kcapWhite); stroke: #a3a49f; }
+.p-pluck .kptr { stroke: #2a2b2c; stroke-width: 3.5; }
+
+/* Noise */
+.module.p-noise {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 300' preserveAspectRatio='none'%3E%3Cg fill='none' stroke='%23111' stroke-width='.7' stroke-opacity='.32'%3E%3Ccircle cx='22' cy='78' r='9'/%3E%3Ccircle cx='22' cy='78' r='15'/%3E%3Ccircle cx='22' cy='78' r='21'/%3E%3Cpath d='M58 40 l6 -8 l6 8 l6 -8 l6 8 l6 -8'/%3E%3Cpath d='M70 120 q14 10 4 24 q-10 14 6 24'/%3E%3Cpath d='M76 166 l4 6 l3 -7'/%3E%3Cpath d='M6 150 c10 -16 26 16 36 0 s26 16 36 0'/%3E%3Cpath d='M12 205 a6 6 0 1 1 6 6 a10 10 0 1 1 -10 -10 a14 14 0 1 1 14 14'/%3E%3Cpath d='M60 230 l18 -10 m-6 -1 l6 1 l-2 6'/%3E%3Cpath d='M8 262 h20 m-4 -4 l4 4 l-4 4'/%3E%3Cpath d='M64 270 c4 -10 12 -10 16 0 c4 10 12 10 16 0'/%3E%3C/g%3E%3C/svg%3E") 0 0 / 100% 100% no-repeat,
+    linear-gradient(90deg, #ece9df, #f4f2ea 50%, #e9e6dc);
+  box-shadow: inset 1px 0 #fffdf7, inset -1px 0 #a9a69d;
+}
+.p-noise .mtitle { border-bottom: 1.5px solid #111; }
+.p-noise .mtitle b, .p-noise .klabel, .p-noise .plate { font-family: "Trebuchet MS", "Helvetica Neue", Arial, sans-serif; font-style: italic; color: #111; }
+.p-noise .klabel { font-weight: 700; text-transform: lowercase; letter-spacing: .03em; font-size: 0.833rem; }
+.p-noise .msub { color: #3b3a36; font-style: italic; }
+.p-noise .kvalue { color: #3d3c38; }
+.p-noise .plate { font-size: 1.083rem; letter-spacing: .08em; text-transform: lowercase; font-weight: 700; }
+.p-noise .ktick { stroke: #111; }
+.p-noise .ktrack { stroke: #24231f; }
+.p-noise .kskirt { fill: #1d2f6b; stroke: #0b1433; }
+.p-noise .kcap { fill: url(#kcapBlue); stroke: #102468; }
+.p-noise .kptr { stroke: #f4f2ea; stroke-width: 3.5; }
+
+/* Metal */
+.module.p-metal {
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,.10) 0 1px, rgba(0,0,0,.05) 1px 2px, transparent 2px 3px),
+    linear-gradient(90deg, #b4b8bc, #cfd2d5 45%, #babec2);
+  box-shadow: inset 1px 0 #e6e8ea, inset -1px 0 #7f8388;
+}
+.p-metal .mtitle { border-bottom: 1px solid #1a1a1a; }
+.p-metal .mtitle b, .p-metal .klabel, .p-metal .plate, .p-metal .msub { font-family: Georgia, "Times New Roman", "DejaVu Serif", serif; font-variant: small-caps; text-transform: none; color: #121212; }
+.p-metal .mtitle b { letter-spacing: .12em; font-weight: 400; font-size: 1rem; }
+.p-metal .klabel { letter-spacing: .06em; font-size: 0.875rem; }
+.p-metal .msub { color: #2d2f31; font-size: 0.833rem; }
+.p-metal .kvalue { color: #2f3133; }
+.p-metal .plate { font-size: 1.083rem; letter-spacing: .14em; border-top: 1px solid #1a1a1a; border-bottom: 1px solid #1a1a1a; }
+.p-metal .ktick { stroke: #161616; }
+.p-metal .kskirt { fill: #0c0c0c; stroke: #000; }
+.p-metal .kcap { fill: url(#kcapBlack); stroke: #2a2b2d; }
+.p-metal .kptr { stroke: #f5f5f5; stroke-width: 3; }
+
+/* Modal */
+.module.p-modal {
+  background:
+    radial-gradient(circle, rgba(201,182,239,.16) 0 .8px, transparent 1.2px) 0 0 / 10px 10px,
+    linear-gradient(90deg, #321556, #3f1d6b 50%, #301452);
+  box-shadow: inset 1px 0 #5a3590, inset -1px 0 #1b0b33;
+}
+.p-modal .mtitle { border-bottom: 1px solid #c9b6ef; }
+.p-modal .mtitle b, .p-modal .klabel, .p-modal .plate { font-family: "Helvetica Neue", Arial, sans-serif; color: #e3d8fa; font-weight: 600; }
+.p-modal .klabel { letter-spacing: .1em; }
+.p-modal .msub { color: #c9b6ef; }
+.p-modal .kvalue { color: #bfaee6; }
+.p-modal .plate { letter-spacing: .3em; font-size: 0.917rem; }
+.p-modal .ktick { stroke: #c9b6ef; }
+.p-modal .ktrack { stroke: #170829; }
+.p-modal .kskirt { fill: #120a1c; stroke: #000; r: 27px; }
+.p-modal .kcap { fill: url(#kcapBlack); stroke: #3a2a55; r: 21px; }
+.p-modal .kptr { stroke: #d9c9ff; stroke-width: 3; }
+
+/* Snare / clap */
+.module.p-snare {
+  background:
+    linear-gradient(90deg, #dcdee1, #eeeff1 50%, #d9dbde);
+  box-shadow: inset 1px 0 #ffffff, inset -1px 0 #9ea2a7;
+}
+.p-snare .mtitle { border-bottom: 2px solid #111; }
+.p-snare .mtitle b, .p-snare .klabel, .p-snare .plate { font-family: "Helvetica Neue", Arial, sans-serif; font-style: italic; font-weight: 800; color: #0d0d0d; }
+.p-snare .klabel { font-size: 0.833rem; letter-spacing: .04em; }
+.p-snare .msub { color: #3a3c40; }
+.p-snare .kvalue { color: #34363a; }
+.p-snare .plate { background: #111; color: #f2f2f2; border-radius: 1px; font-size: 1rem; letter-spacing: .1em; }
+.p-snare .ktick { stroke: #0d0d0d; stroke-width: 1.6; }
+.p-snare .kskirt { fill: #111; stroke: #6a6d72; stroke-width: 3; stroke-dasharray: 2.2 2.2; }
+.p-snare .kcap { fill: url(#kcapBlack); stroke: #000; }
+.p-snare .kptr { stroke: #f2f2f2; stroke-width: 3.5; }
+
+/* light faceplates: keep hover / focus and the dark controls readable */
+.p-pluck .knob:not(.ro):hover .kcap, .p-pluck .knob.active .kcap,
+.p-noise .knob:not(.ro):hover .kcap, .p-noise .knob.active .kcap,
+.p-metal .knob:not(.ro):hover .kcap, .p-metal .knob.active .kcap,
+.p-snare .knob:not(.ro):hover .kcap, .p-snare .knob.active .kcap { stroke: #9b7a32; stroke-width: 2; }
+.p-pluck .knob:hover .kvalue, .p-noise .knob:hover .kvalue, .p-metal .knob:hover .kvalue, .p-snare .knob:hover .kvalue,
+.p-pluck .knob.active .kvalue, .p-noise .knob.active .kvalue, .p-metal .knob.active .kvalue, .p-snare .knob.active .kvalue { color: #000; }
+.p-pluck .knob:focus-visible, .p-noise .knob:focus-visible, .p-metal .knob:focus-visible, .p-snare .knob:focus-visible { outline-color: #6b4f12; }
+.p-pluck .knob .kvalue .eff, .p-noise .knob .kvalue .eff, .p-metal .knob .kvalue .eff, .p-snare .knob .kvalue .eff { color: #a00d09; }
+.module.drum select.engine { box-shadow: 0 0 0 1px #000a; }
+/* the Voices rack: rail holes, like a small Eurorack row */
+#voices.rack { position: relative; }
+#voices.rack::before, #voices.rack::after { content: ""; position: absolute; left: 0; right: 0; height: 6px; pointer-events: none;
+  background: radial-gradient(ellipse 3px 1.8px at 50% 50%, #2b2d31 0 85%, transparent 100%) 6px 0 / 18px 6px repeat-x; }
+#voices.rack::before { top: -6px; }
+#voices.rack::after { bottom: -6px; }
+.p-modal .knob .kvalue .eff { color: #ff7a7a; }
+.p-metal .knob .kvalue .eff { color: #860a07; }

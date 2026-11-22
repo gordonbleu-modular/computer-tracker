@@ -20,7 +20,9 @@ inline int32_t clamp32(int32_t x, int32_t lo, int32_t hi) {
 }
 // Symmetric saturation with one compare in the common (in-range) case.
 inline int32_t sat(int32_t x, int32_t lim) {
-    if (static_cast<uint32_t>(x + lim) > static_cast<uint32_t>(2 * lim)) x = x < 0 ? -lim : lim;
+    // (0.4.0) Marked unlikely, so the in-range case falls through without a
+    // taken branch (1 cycle instead of 2 on the M0+, ~40-60 sat()s per sample).
+    if (__builtin_expect(static_cast<uint32_t>(x + lim) > static_cast<uint32_t>(2 * lim), 0)) x = x < 0 ? -lim : lim;
     return x;
 }
 inline int32_t clamp16(int32_t x) { return sat(x, 32767); }
@@ -58,6 +60,9 @@ struct Tables {
     uint16_t ks_loss[128];      // KS loop gain reduction (Q15) at a 200-sample period
     int16_t pan_l[128], pan_r[128];
     uint16_t level[128];        // fader law, Q12 (127 -> 4096 = 0 dB)
+    uint16_t rv_rate[128];      // reverb decay: log2 gain per 16 kHz reverb tick, Q24 (0.4.0)
+    uint16_t exp2n[65];         // 2^(-i/64), Q15
+    uint16_t send_law[128];     // reverb send law (s/127)^2, Q15 (0.4.1: shared by the mixer knob and the W effect)
     bool ready = false;
 };
 
@@ -112,6 +117,13 @@ inline void init_tables() {
         t.level[p] = static_cast<uint16_t>(std::lround(g_lin * 4096.0f));
     }
     t.pan_l[64] = t.pan_r[64] = 23170; // exact centre (-3 dB)
+    for (int p = 0; p < 128; ++p) {
+        // Reverb decay param 0..127 -> -60 dB time 0.3 .. 9 s (exponential).
+        const float t60 = 0.3f * std::pow(30.0f, static_cast<float>(p) / 127.0f);
+        t.rv_rate[p] = static_cast<uint16_t>(std::lround(9.9658f / (t60 * 16000.0f) * 16777216.0f));
+    }
+    for (int sd = 0; sd < 128; ++sd) t.send_law[sd] = static_cast<uint16_t>((sd * sd * 32767) / 16129);
+    for (int i = 0; i <= 64; ++i) t.exp2n[i] = static_cast<uint16_t>(std::lround(32767.0f * std::pow(2.0f, -static_cast<float>(i) / 64.0f)));
     t.ready = true;
 }
 

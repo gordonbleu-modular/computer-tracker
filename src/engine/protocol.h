@@ -19,8 +19,20 @@ constexpr uint8_t kMfr = 0x7D;
 constexpr uint8_t kDevice = 0x54;
 // v2: SetMacroMask, Panel report. v3 (fw 0.3.0): 8 tracks, 6-byte cells (2 FX).
 // v4 (fw 0.3.1): 8 tracks, 4-byte cells (one effect again); v3's 6-byte forms are still accepted.
-constexpr uint8_t kProtocolVersion = 4;
-constexpr uint8_t kFwMajor = 0, kFwMinor = 3, kFwPatch = 1;
+// v5 (fw 0.3.2): fixed CV mapping C0 = 0 V (SetZeroNote is ignored), no CV velocity,
+//                panel slot select over the occupied slots. Wire format = v4.
+// v6 (fw 0.4.0): lo-fi reverb. SetMix param 8 = reverb send, SetMaster params
+//                3..7 = reverb return/size/decay/tone/lo-fi, header bytes 21..26 =
+//                sends, byte 27 = fx_ver (1), Status +1 byte (reverb return meter).
+//                fw 0.4.1: per-step effect W (reverb send for one hit); same protocol,
+//                older firmware simply ignores the letter.
+//    v7 (fw 0.4.2): SetMaster param 8 = reverb return mute, 9 = master mute
+//                (value >= 64 = muted). Live only: not stored in the song, off
+//                at power-up. Status flags bit 32 / 64 report them.
+constexpr uint8_t kProtocolVersion = 7;
+constexpr uint8_t kMasterRvMute = 8, kMasterMute = 9;
+constexpr uint8_t kFwMajor = 0, kFwMinor = 4, kFwPatch = 2;
+constexpr uint8_t kMixSend = 8;    // SetMix pseudo-parameter: reverb send (song header fx_send)
 constexpr int kV030CellWire = 6;   // cell size in SetCell/SetCells from a 0.3.0 editor (second effect folded, see cell_from_wire)
 constexpr int kSlots = 6;
 constexpr int kChunkRows = 16;
@@ -137,7 +149,7 @@ public:
         case Ping: host_.pinged(); break;
         case SetCell: {
             if ((n != 7 && n != 9) || !cell_ok(p[0], p[1], p[2])) return reject();
-            s.cells[p[0]][p[1]][p[2]] = cell_from_wire(p + 3, n == 9);
+            s.cells[p[0]][p[1]][p[2]] = cell_from_wire(p + 3, n == 9, p[1]);
             break;
         }
         case SetCells: {
@@ -147,7 +159,7 @@ public:
             const int w = n == 4 + count * kCellBytes ? kCellBytes : (n == 4 + count * kV030CellWire ? kV030CellWire : 0);
             if (!w) return reject();
             for (int i = 0; i < count; ++i) {
-                s.cells[p[0]][p[1]][p[2] + i] = cell_from_wire(p + 4 + i * w, w == kV030CellWire);
+                s.cells[p[0]][p[1]][p[2] + i] = cell_from_wire(p + 4 + i * w, w == kV030CellWire, p[1]);
             }
             break;
         }
@@ -165,11 +177,16 @@ public:
             s.cv[p[0]][p[1]] = p[2];
             break;
         case SetMix:
-            if (n != 3 || p[0] >= kChannels || p[1] >= kParamsPerChannel) return reject();
-            s.mix[p[0]][p[1]] = p[2];
+            if (n != 3 || p[0] >= kChannels || p[1] > kMixSend) return reject();
+            if (p[1] == kMixSend) s.fx_send[p[0]] = p[2];
+            else s.mix[p[0]][p[1]] = p[2];
             break;
         case SetMaster:
-            if (n != 2 || p[0] >= kParamsPerChannel) return reject();
+            if (n != 2 || p[0] > kMasterMute) return reject();
+            if (p[0] >= kMasterRvMute) {   // v7: live mutes, sent to the audio core
+                host_.command(Command{CmdType::SetMute, static_cast<uint8_t>(p[0] - kMasterRvMute), static_cast<uint8_t>(p[1] >= 64), 0});
+                break;
+            }
             s.master[p[0]] = p[1];
             break;
         case SetEntry:
@@ -192,9 +209,9 @@ public:
             if (n != kNameLen) return reject();
             for (int i = 0; i < kNameLen; ++i) s.name[i] = (p[i] >= 32 && p[i] <= 126) ? static_cast<char>(p[i]) : (p[i] ? ' ' : 0);
             break;
-        case SetZeroNote:
+        case SetZeroNote:   // 0.3.2: the CV mapping is fixed (C0 = 0 V); accepted and ignored
             if (n != 1 || p[0] > 126) return reject();
-            s.cv_zero_note = p[0];
+            s.cv_zero_note = kCvZeroNote;
             break;
         case SetMacroMask:
             if ((n != 2 && n != 3) || p[0] > MacroColour || p[1] > 0x0F || (n == 3 && p[2] > 0x0F)) return reject();
@@ -288,9 +305,15 @@ private:
     static bool cell_ok(uint8_t p, uint8_t t, uint8_t r) { return p < kPatterns && t < kTracks && r < kRows; }
     // A 6-byte cell from a 0.3.0 editor carries a second effect: it is dropped, or moved into
     // the effect column if that one is empty (same rule as song_from_v030).
-    static Cell cell_from_wire(const uint8_t* c, bool v030) {
+    // CV tracks have no velocity, and their notes stay in C0..B5 (0.3.2).
+    static Cell cell_from_wire(const uint8_t* c, bool v030, int track) {
         const bool use2 = v030 && c[2] == FxNone && c[4] != FxNone;
-        return Cell{c[0], c[1], use2 ? c[4] : c[2], use2 ? c[5] : c[3]};
+        Cell v{c[0], c[1], use2 ? c[4] : c[2], use2 ? c[5] : c[3]};
+        if (track >= kFirstCvTrack && track < kFirstInTrack) {
+            v.vel = 0;
+            if (v.note != kNoteEmpty && v.note < kNoteOff) v.note = static_cast<uint8_t>(cv_fold_note(v.note));
+        }
+        return v;
     }
     void reject() { ++rejected_; }
 
@@ -324,7 +347,8 @@ inline int build_status(uint8_t* b, const EngineStatus& st, const Song& s, Mixer
     for (int ch = 0; ch < kChannels + 2; ++ch) b[i++] = static_cast<uint8_t>(mx.take_peak(ch));
     b[i++] = trig_bits & 0x0F;
     b[i++] = static_cast<uint8_t>(st.swap_count & 0x7F);
-    return i;   // 29 bytes
+    b[i++] = static_cast<uint8_t>(mx.take_reverb_peak());   // v6
+    return i;   // 30 bytes
 }
 
 // --- Panel report (v2) -------------------------------------------------------

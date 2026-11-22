@@ -38,6 +38,14 @@ function ensureDefs() {
   svg('stop', { offset: '0%', 'stop-color': '#f4f5f6' }, g);
   svg('stop', { offset: '55%', 'stop-color': '#aab0b6' }, g);
   svg('stop', { offset: '100%', 'stop-color': '#5d6168' }, g);
+  // 0.4.2: cap colours for the drum faceplates (see style.css, .p-*)
+  for (const [id, c0, c1, c2] of [['kcapBlack', '#5a5c60', '#1c1d1f', '#050505'], ['kcapWhite', '#ffffff', '#ecebe6', '#b9b8b2'],
+    ['kcapBlue', '#8fb2ff', '#2f5fd8', '#173483'], ['kcapCream', '#fffdf6', '#e4dfcf', '#a8a292']]) {
+    const x = svg('radialGradient', { id, cx: '35%', cy: '30%', r: '75%' }, defs);
+    svg('stop', { offset: '0%', 'stop-color': c0 }, x);
+    svg('stop', { offset: '55%', 'stop-color': c1 }, x);
+    svg('stop', { offset: '100%', 'stop-color': c2 }, x);
+  }
   document.body.appendChild(holder);
 }
 

@@ -47,6 +47,37 @@ inline uint32_t isqrt32(uint32_t x) {
     return r;
 }
 
+// floor(sqrt(x)) for every uint32_t, identical to isqrt32() but ~3x cheaper
+// on the M0+: an 8-bit table seed, one Newton step (one hardware divide) and
+// an exact +-1 correction. Checked against isqrt32() in tests/test_engine.cpp.
+struct SqrtSeed {
+    uint16_t t[256];   // round(16 * sqrt(i))
+    constexpr SqrtSeed() : t() {
+        for (int i = 0; i < 256; ++i) {
+            int r = 0;
+            while ((r + 1) * (r + 1) <= 256 * i) ++r;   // floor(16 sqrt(i))
+            t[i] = static_cast<uint16_t>(r);
+        }
+    }
+};
+inline constexpr SqrtSeed kSqrtSeed{};
+inline uint32_t isqrt32_fast(uint32_t x) {
+    if (x < 256) return kSqrtSeed.t[x] >> 4;
+    uint32_t t = x;
+    int k = 0;                                   // result shift
+    if (t >= (1u << 24)) { t >>= 16; k += 8; }
+    if (t >= (1u << 16)) { t >>= 8; k += 4; }
+    if (t >= (1u << 12)) { t >>= 4; k += 2; }
+    if (t >= (1u << 8)) { t >>= 4; k += 2; }
+    uint32_t r = (static_cast<uint32_t>(kSqrtSeed.t[t]) << k) >> 4;
+    if (r == 0) r = 1;
+    r = (r + x / r) >> 1;
+    if (r > 65535) r = 65535;
+    while (r * r > x) --r;
+    while (r < 65535 && (r + 1) * (r + 1) <= x) ++r;
+    return r;
+}
+
 class DrumVoice {
 public:
     void trigger(const TriggerArgs& t) {
@@ -59,8 +90,17 @@ public:
         b_ = t.b;
         aenv_.start(1u << 24, T.decay_coef[decay_]);
         life_ = (T.decay_samples[decay_] >> 3) + (T.decay_samples[decay_] >> 4) + 64;
+        if (!active_) hold_ = 0;   // (from silence: hold 0 until the first sample)
         ctl_ = 0;
+        ghost_ = 0;
+#ifdef TRK_SOUND_CHECK
+        first_ = true;
+#endif
+        wait_ = 1;   // first sample on the next interrupt (0.4.0)
         active_ = true;
+        peak_ = 0;
+        quiet_ = 0;
+        win_ = 0;
         switch (engine_) {
         case EngKick:
             inc_base_ = T.note_inc[note];
@@ -82,6 +122,7 @@ public:
             break;
         }
         case EngNoise:
+            makeup_f_ = -1;
             f_base_ = T.svf_f[note];
             q_ = clamp32(32768 - a_ * 254, 400, 32768);
             menv_.start(1u << 24, T.decay_coef[clampi(decay_ / 2 + 10, 0, 127)]);
@@ -93,12 +134,13 @@ public:
             menv_.start(1u << 24, T.decay_coef[clampi(decay_ - 12, 0, 127)]);
             break;
         case EngModal: {
-            // Mode 0 is set up now; modes 1 and 2 on the next two samples
-            // (one hardware divide each) so a trigger never spikes the ISR.
+            // Mode 0 is set up on the sample after the trigger, modes 1 and 2
+            // with the first two output samples (two hardware divides each),
+            // so a trigger never shares an interrupt with a setup step.
             modal_note_ = static_cast<uint8_t>(note);
             for (int i = 0; i < 3; ++i) { mlow_[i] = mband_[i] = 0; mgain_[i] = 0; }
-            setup_modal(0);
-            modal_stage_ = 1;
+            modal_stage_ = 0;
+            wait_ = 2;          // mode 0 on the next interrupt, the sound one later
             exc_count_ = 96;
             lp_a_ = clamp32(2000 + b_ * 240, 0, 32767);
             exc_lp_ = 0;
@@ -133,9 +175,39 @@ public:
 
     bool active() const { return active_; }
     uint8_t engine() const { return engine_; }
+    // Called instead of render() while the voice is silent.
+    // Returns false once nothing is owed any more.
+    bool idle() {
+        if (!ghost_) return false;
+        --ghost_;
+        if (engine_ == EngMetal) { ph1_ += inc1_; ph2_ += inc2_; }
+        else rng_.next();
+        return ghost_ != 0;
+    }
+    // Early end: the mixer's threshold for this voice's channel (see Mixer).
+    void set_end_threshold(const int32_t* t) { end_thr_ = t; }
+    // A Modal voice still sets up a resonator on its next render (a divide).
+    bool setup_pending() const { return active_ && engine_ == EngModal && modal_stage_ < 3; }
 
     int32_t render() {
         if (!active_) return 0;
+        // The trigger and the voice's first sample never share an audio
+        // interrupt: every hit starts one sample (21 us) after its trigger
+        // (Modal: one more sample that sets up its first resonator). In
+        // between the voice holds its last output, so a retriggered ringing
+        // voice does not dip to zero.
+        if (wait_) {
+            if (--wait_ == 0 && engine_ == EngModal) setup_modal(modal_stage_++);
+            return hold_;
+        }
+#ifdef TRK_SOUND_CHECK
+        if (ctl_ == 0 && first_) { first_ = false; ++starts_; }
+#endif
+        return hold_ = render_sound();
+    }
+
+private:
+    int32_t render_sound() {
         if (ctl_ == 0) control();
         ctl_ = (ctl_ + 1) & (kControlRate - 1);
         amp_ += amp_step_;
@@ -162,6 +234,7 @@ public:
                 y += (exc_lp_ * vel_amp_) >> 15;
             }
             y = clamp16(y);
+            if (y > peak_) peak_ = y; else if (-y > peak_) peak_ = -y;
             ks_[ks_pos_] = static_cast<int16_t>(y);
             ks_pos_ = (ks_pos_ + 1) & (kKsSize - 1);
             return y;
@@ -198,7 +271,9 @@ public:
                 sum += mband_[i];
             }
             y = clamp16(sum >> 1);
-            return (y * vel_amp_) >> 15;
+            y = (y * vel_amp_) >> 15;
+            if (y > peak_) peak_ = y; else if (-y > peak_) peak_ = -y;
+            return y;
         }
         case EngSnare:
         default: {
@@ -216,7 +291,6 @@ public:
         }
     }
 
-private:
     void setup_modal(int i) {
         const Tables& T = g_tables;
         const uint16_t* r = kModalRatios[a_ >> 4];
@@ -231,12 +305,44 @@ private:
         mq_[i] = clamp32(T.modal_k[d] / f, 3, 32768);
     }
 
+    // True once the voice can no longer reach 1/4 LSB at the outputs.
+    bool below_end(int32_t target) {
+        const int32_t thr = end_thr_ ? *end_thr_ : 0;
+        if (thr <= 0) return false;
+        switch (engine_) {
+        case EngPluck:
+        case EngModal:
+            // Free-ringing: watch the output peak over 4096-sample windows;
+            // stop after two quiet windows in a row (not during the burst).
+            if (++win_ < 4096 / kControlRate) return false;
+            win_ = 0;
+            quiet_ = (exc_count_ == 0 && peak_ * 2 < thr) ? quiet_ + 1 : 0;
+            peak_ = 0;
+            return quiet_ >= 2;
+        case EngKick: {
+            // Output <= envelope (x drive gain); the envelope only falls.
+            const int32_t a = amp_ > target ? amp_ : target;
+            return (b_ ? (a * (16 + b_)) >> 4 : a) < thr;
+        }
+        case EngSnare:
+            if (burst_left_) return false;   // clap bursts restart the envelope
+            [[fallthrough]];
+        default:
+            return amp_ < thr && target < thr;
+        }
+    }
+
     void control() {
         aenv_.tick();
         int32_t target = (aenv_.q15() * vel_amp_) >> 15;
         if (engine_ == EngModal) target = 32767;   // modal decay lives in the resonators
         amp_step_ = (target - amp_) >> 3;
-        if (life_ <= 0) {
+        if (life_ <= 0 || below_end(target)) {
+            // After an early end the free-running state the next hit inherits
+            // (noise generator, FM phases) keeps stepping in idle() for as
+            // long as the voice would have rung, so the next hits start
+            // exactly as without the early end.
+            ghost_ = (engine_ == EngNoise || engine_ == EngSnare || engine_ == EngMetal) && life_ > 0 ? life_ * kControlRate : 0;
             active_ = false;
             amp_ = amp_step_ = 0;
             return;
@@ -246,7 +352,10 @@ private:
         case EngKick: {
             menv_.tick();
             const uint32_t k = (static_cast<uint32_t>(a_) * 7u * static_cast<uint32_t>(menv_.q15())) >> 10;
-            inc_cur_ = static_cast<uint32_t>((static_cast<uint64_t>(inc_base_) * (4096u + k)) >> 12);
+            // inc_base * (4096 + k) >> 12 without a 64-bit multiply (exact, the
+            // M0+ has none): split inc_base into 16-bit halves.
+            const uint32_t m = 4096u + k;   // < 2^15
+            inc_cur_ = ((inc_base_ >> 16) * m << 4) + (((inc_base_ & 0xFFFFu) * m) >> 12);
             break;
         }
         case EngNoise: {
@@ -255,7 +364,11 @@ private:
             f_cur_ = clamp32(f_base_ + ((f_base_ * (k >> 4)) >> 11), 1, 28000);
             // Band-pass noise loudness ~ sqrt(f/q): compensate so every
             // pitch/resonance setting has a similar level.
-            makeup_ = clamp32(static_cast<int32_t>(12u * isqrt32((static_cast<uint32_t>(q_) << 16) / static_cast<uint32_t>(f_cur_) * 2u)), 64, 32000);
+            // (Only when the cutoff moved: without a sweep it is computed once.)
+            if (f_cur_ != makeup_f_) {
+                makeup_f_ = f_cur_;
+                makeup_ = clamp32(static_cast<int32_t>(12u * isqrt32_fast((static_cast<uint32_t>(q_) << 16) / static_cast<uint32_t>(f_cur_) * 2u)), 64, 32000);
+            }
             break;
         }
         case EngMetal:
@@ -293,7 +406,7 @@ private:
     uint32_t ph1_ = 0, ph2_ = 0, inc1_ = 0, inc2_ = 0, inc_base_ = 0, inc_cur_ = 0;
     int32_t idx_max_ = 0, idx_cur_ = 0, benv_ = 0;
     // filters
-    int32_t low_ = 0, band_ = 0, f_base_ = 0, f_cur_ = 0, q_ = 16384, makeup_ = 4096;
+    int32_t low_ = 0, band_ = 0, f_base_ = 0, f_cur_ = 0, q_ = 16384, makeup_ = 4096, makeup_f_ = -1;
     int32_t mlow_[3] = {}, mband_[3] = {}, mf_[3] = {}, mq_[3] = {}, mgain_[3] = {};
     // exciter / KS
     int32_t exc_count_ = 0, exc_lp_ = 0, lp_a_ = 0, damp_ = 0, gain_ = 0, prev_ = 0;
@@ -302,6 +415,18 @@ private:
     int32_t burst_left_ = 0, burst_gap_ = 0, burst_timer_ = 0;
     uint8_t modal_note_ = 60;
     int modal_stage_ = 3;
+    const int32_t* end_thr_ = nullptr;
+    int32_t peak_ = 0;
+    int quiet_ = 0, win_ = 0;
+    int32_t ghost_ = 0;
+    int wait_ = 0;
+    int32_t hold_ = 0;
+public:
+#ifdef TRK_SOUND_CHECK
+    bool first_ = false;
+    uint32_t starts_ = 0;   // tools/sound_check: hits whose first sample rendered
+#endif
+private:   // noise steps still owed after an early end
     Rng rng_;
     int16_t ks_[kKsSize] = {};
 public:

@@ -48,6 +48,7 @@ int boot_slot() {
 
 class TrackerCard : public ComputerCard {
 public:
+    int32_t cv_last_[2] = {INT32_MIN, INT32_MIN};   // last CV outputs written
     void __not_in_flash_func(ProcessSample)() override {
         const uint32_t t0 = systick_hw->cvr;
 
@@ -74,12 +75,13 @@ public:
 
         AudioOut1(out.audio[0]);
         AudioOut2(out.audio[1]);
-        CVOut1Millivolts(out.cv_mv[0]);
-        CVOut2Millivolts(out.cv_mv[1]);
+        // CV outputs only when the pitch changed (exact: same values, the
+        // PWM simply keeps its level; ~100 cycles saved per idle sample).
+        if (out.cv_mv[0] != cv_last_[0]) { cv_last_[0] = out.cv_mv[0]; CVOut1Millivolts(out.cv_mv[0]); }
+        if (out.cv_mv[1] != cv_last_[1]) { cv_last_[1] = out.cv_mv[1]; CVOut2Millivolts(out.cv_mv[1]); }
         PulseOut1(out.gate[0]);
         PulseOut2(out.gate[1]);
-        if (out.leds_valid)
-            for (int i = 0; i < 6; ++i) LedBrightness(static_cast<uint32_t>(i), out.led[i]);
+        if (out.led_index >= 0) LedBrightness(static_cast<uint32_t>(out.led_index), out.led_value);
 
         const uint32_t cyc = (t0 - systick_hw->cvr) & 0x00FFFFFFu;
         g_cyc_sum = g_cyc_sum + cyc;
@@ -107,6 +109,17 @@ void midi_write_blocking(const uint8_t* data, uint32_t n) {
     }
 }
 
+// Occupied flash slots (current, 0.3.0 or 0.1/0.2 record), bit k = slot k.
+uint8_t valid_slot_mask() {
+    uint8_t mask = 0;
+    for (int i = 0; i < trk::store::kSlots; ++i)
+        if (trk::store::slot_valid(flash_ptr(trk::store::slot_offset(kFlashSize, i))) ||
+            trk::store::slot_valid_v030(flash_ptr(trk::store::slot_offset(kFlashSize, i))) ||
+            trk::store::slot_valid_v2(flash_ptr(trk::store::v2_slot_offset(kFlashSize, i))))
+            mask |= static_cast<uint8_t>(1u << i);
+    return mask;
+}
+
 class FirmwareHost : public trk::proto::Host {
 public:
     trk::Song* live() override { return g_engine.live(); }
@@ -128,12 +141,7 @@ public:
 
     void info_fields(uint8_t& slot, uint8_t& mask) override {
         slot = static_cast<uint8_t>(g_engine.status().slot);
-        mask = 0;
-        for (int i = 0; i < trk::store::kSlots; ++i)
-            if (trk::store::slot_valid(flash_ptr(trk::store::slot_offset(kFlashSize, i))) ||
-                trk::store::slot_valid_v030(flash_ptr(trk::store::slot_offset(kFlashSize, i))) ||
-                trk::store::slot_valid_v2(flash_ptr(trk::store::v2_slot_offset(kFlashSize, i))))
-                mask |= static_cast<uint8_t>(1u << i);
+        mask = valid_slot_mask();
     }
 
     void pinged() override {
@@ -274,7 +282,10 @@ void run_job() {
         const bool ok = write_slot(arg, *snap);
         if (ok) write_sys_slot(arg);
         g_engine.set_busy(false);
-        if (ok) g_engine.commands().push(trk::Command{trk::CmdType::SetSlot, static_cast<uint8_t>(arg), 0, 0});
+        if (ok) {
+            push_cmd(trk::Command{trk::CmdType::SetSlot, static_cast<uint8_t>(arg), 0, 0});
+            push_cmd(trk::Command{trk::CmdType::SetSlotMask, valid_slot_mask(), 0, 0});
+        }
         g_protocol.send_ack(trk::proto::Save, ok ? trk::proto::AckOk : trk::proto::AckError, static_cast<uint8_t>(arg));
         break;
     }
@@ -328,6 +339,8 @@ void send_panel_if_due() {
 }
 
 void core1_main() {
+    // Tell the panel which slots hold songs (the queue is empty at boot; USB is not up yet).
+    g_engine.commands().push(trk::Command{trk::CmdType::SetSlotMask, valid_slot_mask(), 0, 0});
     tusb_init();
     while (true) {
         service_usb();

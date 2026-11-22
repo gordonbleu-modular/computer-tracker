@@ -9,6 +9,7 @@ const s = demoSong();
 s.setMacroMask(0, 0b1011); // Main: drums 1, 2, 4
 s.setMacroMask(1, 0b0110); // X: drums 2, 3
 s.setDrum(3, 0, 4);        // Modal on drum 4
+[12, 80, 64, 72, 0, 30].forEach((x, ch) => s.setSend(ch, x)); // some reverb send (0.4.0)
 const input = Buffer.concat(uploadMessages(s).map((m) => Buffer.from(m)));
 writeFileSync('build-host/ui-dump.bin', execFileSync(xc, ['apply'], { input, maxBuffer: 1 << 22 }));
 console.log('wrote build-host/ui-dump.bin');

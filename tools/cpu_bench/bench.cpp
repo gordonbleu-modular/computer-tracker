@@ -20,9 +20,22 @@ volatile int32_t sink;
 //             both IN tracks ratcheting (IN1 own track, IN2
 //             following CV2), inputs with drive/tone/VCA, macros routed,
 //             master filter on
+// scenario 3: demo song with the reverb (sends as docs/audio/demo_reverb.wav)
+// scenario 4: worst case + reverb sent from all six channels, maximum size and
+//             decay, lo-fi 64 (wobble on)
+// scenario 5: stopped, only the reverb tail ringing (one short hit, then silence)
+static void reverb_on(Song& s, const uint8_t* sends, int size, int decay, int lofi) {
+    for (int c = 0; c < kChannels; ++c) s.fx_send[c] = sends[c];
+    s.master[MsRvReturn] = 100;
+    s.master[MsRvSize] = static_cast<uint8_t>(size);
+    s.master[MsRvDecay] = static_cast<uint8_t>(decay);
+    s.master[MsRvTone] = 52;
+    s.master[MsRvLofi] = static_cast<uint8_t>(lofi);
+}
+
 extern "C" void bench_init(int scenario) {
     eng = new (eng_mem) TrackerEngine();
-    if (scenario == 2) {
+    if (scenario == 2 || scenario == 4) {
         song_clear(song_a);
         song_a.set_tempo(300);
         for (int v = 0; v < kDrumTracks; ++v) {
@@ -46,13 +59,23 @@ extern "C" void bench_init(int scenario) {
             song_a.mix[ch][MpVca] = 60;
         }
         song_a.master[MsFilter] = 20;
+        if (scenario == 4) {
+            const uint8_t all[kChannels] = {100, 100, 100, 100, 100, 100};
+            reverb_on(song_a, all, 127, 127, 64);
+        }
     } else {
         song_demo(song_a);
+        if (scenario == 3 || scenario == 5) {
+            const uint8_t demo[kChannels] = {12, 80, 64, 72, 0, 0};
+            reverb_on(song_a, demo, 84, 72, 48);
+        }
+        if (scenario == 5) { song_a.drum[0][DpDecay] = 0; song_a.fx_send[0] = 127; }
     }
     song_clear(song_b);
     eng->init(&song_a, &song_b, 0, in);
-    in.audio_connected[0] = in.audio_connected[1] = (scenario == 2);
-    if (scenario >= 1) eng->commands().push(Command{CmdType::PlayPattern, 0, 0, 0});
+    in.audio_connected[0] = in.audio_connected[1] = (scenario == 2 || scenario == 4);
+    if (scenario >= 1 && scenario <= 4) eng->commands().push(Command{CmdType::PlayPattern, 0, 0, 0});
+    if (scenario == 5) eng->commands().push(Command{CmdType::Preview, 0, 36, 127});
 }
 
 extern "C" void bench_run(int n) {
@@ -65,5 +88,65 @@ extern "C" void bench_run(int n) {
 }
 
 extern "C" void bench_one() { bench_run(1); }
+
+// ---- isolated pieces for tools/cpu_bench/breakdown.py ----------------------
+// One drum voice on its own: code = engine | a << 8 | b << 16 | decay << 24.
+static DrumVoice vb;
+static uint8_t vb_note = 48;
+extern "C" void voice_init(int code) {
+    init_tables();
+    vb = DrumVoice();
+    vb.seed(12345);
+    TriggerArgs t{};
+    t.engine = static_cast<uint8_t>(code & 7);
+    t.a = static_cast<uint8_t>((code >> 8) & 127);
+    t.b = static_cast<uint8_t>((code >> 16) & 127);
+    t.decay = static_cast<uint8_t>((code >> 24) & 127);
+    t.note = vb_note;
+    t.vel = 127;
+    vb.trigger(t);
+}
+extern "C" void voice_note(int n) { vb_note = static_cast<uint8_t>(n); }
+extern "C" void voice_run(int n) { for (int i = 0; i < n; ++i) sink = vb.render(); }
+extern "C" void voice_one() { sink = vb.render(); }
+extern "C" int voice_active() { return vb.active(); }
+
+// The mixer on its own: code bits 0-5 live channels, 6 drive on, 7 tone LP,
+// 8 tone HP, 9 master filter on, 10 input VCAs (CV gate, gate low = decaying).
+static Mixer mx;
+static Song mx_song;
+static uint32_t mx_mask;
+extern "C" void mix_init(int code) {
+    init_tables();
+    mx = Mixer();
+    song_clear(mx_song);
+    for (int ch = 0; ch < kChannels; ++ch) {
+        mx_song.mix[ch][MpDrive] = (code & 64) ? 60 : 0;
+        mx_song.mix[ch][MpTone] = (code & 128) ? 30 : (code & 256) ? 100 : 64;
+        mx_song.mix[ch][MpVca] = 60;
+        if (ch >= kDrumTracks) mx_song.mix[ch][MpVcaSrc] = (code & 1024) ? VcaCvGate : VcaOpen;
+    }
+    mx_song.master[MsFilter] = (code & 512) ? 20 : 64;
+    mx.update(mx_song, 0);
+    mx_mask = static_cast<uint32_t>(code & 63);
+}
+extern "C" void mix_one() {
+    static int i = 0;
+    int32_t ch[kChannels];
+    for (int c = 0; c < kChannels; ++c) ch[c] = static_cast<int32_t>(((i * (37 + 16 * c)) & 32767) - 16384);
+    ++i;
+    int16_t l, r;
+    mx.process(ch, mx_mask, l, r);
+    sink = l + r;
+}
+extern "C" void mix_gen() {   // harness cost of mix_one without the mixer
+    static int i = 0;
+    int32_t ch[kChannels];
+    for (int c = 0; c < kChannels; ++c) ch[c] = static_cast<int32_t>(((i * (37 + 16 * c)) & 32767) - 16384);
+    ++i;
+    sink = ch[0] + ch[5];
+}
+extern "C" void mix_update_one() { static int k = 0; mx.update_step(mx_song, 0); ++k; }
+extern "C" void softclip_one() { static int32_t x = 1; x = x * 1103515245 + 12345; sink = softclip(x >> 16); }
 
 extern "C" void _start() { bench_init(0); bench_run(1); while (1) {} }

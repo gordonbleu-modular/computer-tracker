@@ -1,7 +1,8 @@
 // Front-panel performance controls (works with or without USB).
 //
 //   Switch Middle  PERFORM  Main = decay macro, X = colour macro, Y = filter macro
-//   Switch Up      SELECT   Main = song slot 1-6, X = tempo, Y = swing
+//   Switch Up      SELECT   Main = song slot (the knob travel is split evenly over the
+//                           occupied slots; empty slots are skipped), X = tempo, Y = swing
 //   Switch Down    (momentary) tap = start / next part, hold 0.8 s = stop
 //
 // Values that are stored in the song (tempo, swing) use soft takeover: the
@@ -56,6 +57,7 @@ public:
     static constexpr int kDebounce = 60;        // 10 ms
     static constexpr int kHold = 4800;          // 0.8 s
     static constexpr int kSettle = 1800;        // 0.3 s before a slot loads
+    static constexpr int kHyst = 64;            // slot zone hysteresis (knob counts, ~1.6 %)
 
     // Call once at start with the current knobs.
     void begin(const int knobs[3], Sw sw, int tempo, int swing, int slot) {
@@ -65,6 +67,7 @@ public:
         raw_sw_ = stable_sw_;
         current_slot_ = slot;
         if (page_up_) enter_up(knobs, tempo, swing);
+        refresh_macros();
     }
 
     void process(const int knobs[3], Sw sw_in, int tempo, int swing, PanelOut& out) {
@@ -80,14 +83,28 @@ public:
         }
 
         if (page_up_) {
-            // Slot select: only after the knob leaves the zone it was in.
-            const int zone = slot_zone(knobs[0]);
-            if (zone != entry_zone_) {
+            // Slot select: the knob travel is split evenly over the occupied
+            // slots (2 slots: switch at 50 %, 3: at 33 / 66 %...). Nothing
+            // happens until the knob leaves the zone it was in when the page
+            // opened (or the slot list changed), so flipping the switch never
+            // loads a song by itself.
+            const int list = slot_list();
+            int order[kSlots];
+            const int n = slots_in(list, order);
+            if (list != list_) { list_ = list; rezone_ = true; }
+            if (rezone_) {
+                zone_ = raw_zone(knobs[0], n);
+                entry_zone_ = candidate_ = zone_;
+                settle_ = 0;
+                rezone_ = false;
+            }
+            zone_ = hyst_zone(knobs[0], n, zone_);
+            if (zone_ != entry_zone_) {
                 entry_zone_ = -1;
-                if (zone != candidate_) { candidate_ = zone; settle_ = kSettle; }
-                else if (settle_ > 0 && --settle_ == 0 && zone != current_slot_) {
-                    out.select_slot = zone;
-                    current_slot_ = zone;
+                if (zone_ != candidate_) { candidate_ = zone_; settle_ = kSettle; }
+                else if (settle_ > 0 && --settle_ == 0 && order[zone_] != current_slot_) {
+                    out.select_slot = order[zone_];
+                    current_slot_ = order[zone_];
                 }
             }
             // Knob jitter must not wobble the tempo: move >10 counts first.
@@ -104,13 +121,17 @@ public:
         } else {
             for (int i = 0; i < 3; ++i) macro_[i].update(knobs[i]);
         }
+        refresh_macros();
     }
 
-    // Macro values, -64..63 with a centre dead zone.
-    int macro(int i) const {
-        const int v = (macro_[i].value >> 5) - 64;
-        if (v > -4 && v < 4) return 0;
-        return v > 0 ? v - 3 : v + 3;
+    // Macro values, -64..63 with a centre dead zone. Computed once per panel
+    // scan (the knob values only change there), read every sample.
+    int macro(int i) const { return mc_[i]; }
+    void refresh_macros() {
+        for (int i = 0; i < 3; ++i) {
+            const int v = (macro_[i].value >> 5) - 64;
+            mc_[i] = (v > -4 && v < 4) ? 0 : (v > 0 ? v - 3 : v + 3);
+        }
     }
     bool page_up() const { return page_up_; }
     bool down_held() const { return stable_sw_ == Sw::Down; }
@@ -124,9 +145,29 @@ public:
         return (macro_[0].caught ? 0 : 1) | (macro_[1].caught ? 0 : 2) | (macro_[2].caught ? 0 : 4);
     }
     int slot() const { return current_slot_; }
-    void set_slot(int s) { current_slot_ = s; }
+    void set_slot(int s) { current_slot_ = clampi(s, 0, kSlots - 1); }
+    // Occupied (valid) flash slots, bit k = slot k. Set by core 1 at boot and after saves.
+    void set_slot_mask(int mask) { mask_ = mask & ((1 << kSlots) - 1); }
+    int slot_mask() const { return mask_; }
+    // Slots the knob chooses from: the occupied ones plus the one playing.
+    int slot_list() const { return mask_ | (1 << current_slot_); }
 
-    static int slot_zone(int knob) { return clampi(knob * kSlots / 4096, 0, kSlots - 1); }
+    // Slots of a bit list in ascending order; returns how many.
+    static int slots_in(int list, int* order) {
+        int n = 0;
+        for (int k = 0; k < kSlots; ++k)
+            if (list & (1 << k)) order[n++] = k;
+        return n;
+    }
+    // Zone of the knob when the travel is split into n equal parts.
+    static int raw_zone(int knob, int n) { return n <= 1 ? 0 : clampi(knob * n / 4096, 0, n - 1); }
+    // Same with hysteresis around the zone edges, relative to the current zone z.
+    static int hyst_zone(int knob, int n, int z) {
+        const int raw = raw_zone(knob, n);
+        if (z < 0 || z >= n || raw == z) return raw;
+        if (raw > z) return knob >= raw * 4096 / n + kHyst ? raw : raw - 1;
+        return knob < (raw + 1) * 4096 / n - kHyst ? raw : raw + 1;
+    }
     static int tempo_to_knob(int bpm) { return clampi((bpm - kTempoMinK) * 4095 / (kTempoMaxK - kTempoMinK), 0, 4095); }
     static int swing_to_knob(int sw) { return clampi((sw - 50) * 4095 / 25, 0, 4095); }
     static constexpr int kTempoMinK = 40, kTempoMaxK = 240;
@@ -134,8 +175,9 @@ public:
 private:
     void enter_up(const int knobs[3], int tempo, int swing) {
         page_up_ = true;
-        entry_zone_ = slot_zone(knobs[0]);
-        candidate_ = entry_zone_;
+        (void)knobs;
+        rezone_ = true;   // the zone the knob is in now is the "entry zone"
+        entry_zone_ = candidate_ = -1;
         tempo_.arm(tempo_to_knob(tempo));
         swing_.arm(swing_to_knob(swing));
         bpm_knob_ = tempo_.value;
@@ -167,6 +209,9 @@ private:
     int held_ = 0;
     uint32_t t_ = 0;
     int entry_zone_ = -1, candidate_ = -1, settle_ = 0, current_slot_ = 0;
+    int zone_ = 0, mask_ = 0, list_ = -1;
+    bool rezone_ = true;
+    int mc_[3] = {0, 0, 0};
     int bpm_knob_ = 0, swing_knob_ = 0;
 };
 

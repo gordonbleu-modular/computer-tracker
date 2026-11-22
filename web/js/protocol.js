@@ -5,7 +5,12 @@
 export const MFR = 0x7d;
 export const DEVICE = 0x54; // 'T'
 // v2: SetMacroMask, Panel report. v3 (fw 0.3.0): 8 tracks, 6-byte cells (2 FX). v4 (fw 0.3.1): 8 tracks, 4-byte cells.
-export const PROTOCOL_VERSION = 4;
+// v5 (fw 0.3.2): fixed CV mapping C0 = 0 V, no CV velocity, slot knob over the occupied slots (wire format = v4).
+// v6 (fw 0.4.0): lo-fi reverb: SetMix param 8 = send, SetMaster 3..7 = reverb, header 21..26 sends,
+//                27 fx version, Status +1 byte (reverb return meter).
+// v7 (fw 0.4.2): SetMaster 8 = reverb return mute, 9 = master mute (>= 64 = muted), live only
+//                (not in the song); Status flags bit 32 / 64 report them.
+export const PROTOCOL_VERSION = 7;
 
 export const K = {
   drumTracks: 4,
@@ -33,6 +38,17 @@ export const K = {
 
 export const NOTE_EMPTY = 0;
 export const NOTE_OFF = 127;
+// CV tracks (0.3.2): only positive voltages, C0 = 0 V, 1 V/oct; C0..B5 = 0..5.92 V (song.h kCvNoteMin/Max).
+export const CV_ZERO_NOTE = 12;
+export const CV_NOTE_MIN = 12;
+export const CV_NOTE_MAX = 83;
+export const CV_OCT_MAX = 5; // octave selector range on CV tracks: 0..5
+export function cvFold(n) {
+  while (n < CV_NOTE_MIN) n += 12;
+  while (n > CV_NOTE_MAX) n -= 12;
+  return n;
+}
+export const cvVolts = (n) => (n - CV_ZERO_NOTE) / 12;
 
 // Byte offsets inside the 212-byte song header (struct SongHeader).
 export const OFF = {
@@ -44,7 +60,8 @@ export const OFF = {
   cvZero: 16,
   macroExcl: 17, // [0] decay macro (Main), [1] colour macro (X): bit set = voice NOT affected
   macroCvin: 19, // v3: [0] Main, [1] X: bit set = routed; bits 0/1 CV1/CV2, 2/3 IN1/IN2
-  reserved: 21,
+  fxSend: 21, // v6: reverb send per mixer channel (6)
+  fxVer: 27, // v6: 1 = reverb fields valid; 0 = older song (sends 0, reverb defaults)
   patLen: 28,
   entries: 44, // 32 x {pattern, repeats}
   drum: 108, // 4 x 8
@@ -76,7 +93,14 @@ export const MATERIALS = ['Membrane', 'Marimba', 'Glock', 'Bell', 'Tube', 'Plate
 export const DRUM_PARAMS = ['engine', 'decay', 'a', 'b', 'tune', 'velSens'];
 export const CV_PARAMS = ['gate', 'glide', 'transpose'];
 export const MIX_PARAMS = ['level', 'pan', 'drive', 'tone', 'vca', 'mute', 'vcaSrc', 'inGate'];
-export const MASTER_PARAMS = ['level', 'drive', 'filter'];
+export const MASTER_PARAMS = ['level', 'drive', 'filter', 'rvReturn', 'rvSize', 'rvDecay', 'rvTone', 'rvLofi'];
+// Reverb (v6): master params 3..7, defaults as kRvDefaults in song.h.
+export const RV = { return: 3, size: 4, decay: 5, tone: 6, lofi: 7 };
+export const RV_DEFAULTS = [96, 64, 64, 56, 40];
+export const FX_VERSION = 1;
+export const MASTER_MUTE = { reverb: 8, master: 9 }; // v7 SetMaster live-mute params (not stored)
+export const MIX_SEND = 8; // SetMix pseudo-parameter for the send
+export const rvSeconds = (d) => 0.3 * Math.pow(30, d / 127); // decay param -> -60 dB time (dsp.h)
 // mix[IN][6]: what opens the input VCA (v3). 0 = v2 behaviour (CV gate if decay > 0, else open).
 export const VCA_SRC = { auto: 0, open: 1, cvGate: 2, inTrack: 3 };
 export const VCA_SRC_NAMES = ['AUTO', 'OPEN', 'CV GATE', 'IN TRACK'];
@@ -95,6 +119,7 @@ export const FX = {
   R: { code: 0x52, name: 'Ratchet', kinds: ['drum', 'cv', 'in'], val: 'raw', min: 2, max: 8, help: 'Repeats the note 2-8 times inside the row.' },
   P: { code: 0x50, name: 'Probability', kinds: ['drum', 'cv', 'in'], val: 'raw', min: 0, max: 99, help: 'Chance in % that the step plays (no P = always).' },
   K: { code: 0x4b, name: 'Delay', kinds: ['drum', 'cv', 'in'], val: 'raw', min: 1, max: 15, help: 'Plays the step n/16 of a row late (08 = half a row, off-beat feel).' },
+  W: { code: 0x57, name: 'Reverb send', kinds: ['drum', 'in'], val: 'pct', help: 'Reverb send for this hit only, instead of the Send knob. Without W the knob applies again. (fw 0.4.1+)' },
 };
 export const FX_BY_CODE = Object.fromEntries(Object.entries(FX).map(([l, f]) => [f.code, { letter: l, ...f }]));
 export const fxFor = (t) => Object.entries(FX).filter(([, f]) => f.kinds.includes(trackKind(t)));
@@ -145,7 +170,16 @@ export class Song {
     const c = this.cells;
     return { note: c[i], vel: c[i + 1], fx: c[i + 2], fxv: c[i + 3] };
   }
+  // Editor edits: CV tracks have no velocity and stay in C0..B5.
   setCell(p, t, r, cell) {
+    if (trackKind(t) === 'cv') {
+      const n = cell.note | 0;
+      cell = { ...cell, vel: 0, note: n && n !== NOTE_OFF && n < 128 ? cvFold(n) : n };
+    }
+    this.setCellRaw(p, t, r, cell);
+  }
+  // As stored (imports and dumps; normalizeCv() converts those afterwards).
+  setCellRaw(p, t, r, cell) {
     const i = Song.cellIndex(p, t, r);
     this.cells[i] = clamp(cell.note | 0, 0, 127);
     this.cells[i + 1] = clamp(cell.vel | 0, 0, 127);
@@ -159,7 +193,7 @@ export class Song {
       for (let t = 0; t < K.tracks; t++)
         for (let r = 0; r < K.rows; r++) {
           const o = ((p * K.tracks + t) * K.rows + r) * 6;
-          this.setCell(p, t, r, fxFrom6(bytes, o));
+          this.setCellRaw(p, t, r, fxFrom6(bytes, o));
         }
   }
   // Cells from a firmware 0.1/0.2 dump or song file (6 tracks x 4 bytes).
@@ -168,8 +202,27 @@ export class Song {
       for (let t = 0; t < K.v2Tracks; t++)
         for (let r = 0; r < K.rows; r++) {
           const o = ((p * K.v2Tracks + t) * K.rows + r) * 4;
-          this.setCell(p, t, r, { note: bytes[o], vel: bytes[o + 1], fx: bytes[o + 2], fxv: bytes[o + 3] });
+          this.setCellRaw(p, t, r, { note: bytes[o], vel: bytes[o + 1], fx: bytes[o + 2], fxv: bytes[o + 3] });
         }
+  }
+  // Songs from firmware/editor <= 0.3.1 had a free "0 V note" (default C2) and CV
+  // velocity. Convert to C0 = 0 V like song_migrate_cv() in song.h: in-range notes keep
+  // their voltage, the rest move by octaves into C0..B5, CV velocity is cleared.
+  // Idempotent; returns true when something changed.
+  normalizeCv() {
+    const zero = this.cvZero <= 126 ? this.cvZero : 36;
+    const shift = zero - CV_ZERO_NOTE;
+    let changed = zero !== CV_ZERO_NOTE;
+    for (let p = 0; p < K.patterns; p++)
+      for (let t = K.firstCv; t < K.firstIn; t++)
+        for (let r = 0; r < K.rows; r++) {
+          const i = Song.cellIndex(p, t, r), c = this.cells;
+          let n = c[i];
+          if (n && n !== NOTE_OFF) n = cvFold(n - shift);
+          if (n !== c[i] || c[i + 1]) { c[i] = n; c[i + 1] = 0; changed = true; }
+        }
+    this.header[OFF.cvZero] = CV_ZERO_NOTE;
+    return changed;
   }
   // Header fields a v2 song lacks get the values that keep it sounding the same.
   migrateHeaderV2() {
@@ -229,6 +282,19 @@ export class Song {
   }
   master(p) { return this.header[OFF.master + p]; }
   setMaster(p, x) { this.header[OFF.master + p] = clamp(x | 0, 0, 127); }
+  // Reverb send per channel (v6).
+  send(ch) { return this.header[OFF.fxSend + ch]; }
+  setSend(ch, x) { this.header[OFF.fxSend + ch] = clamp(x | 0, 0, 127); }
+  get fxVer() { return this.header[OFF.fxVer]; }
+  // Songs from before 0.4.0: sends 0 and reverb defaults (same as header_sanitize()
+  // in song.h), so they sound exactly as before. Returns true when it changed something.
+  migrateFx() {
+    if (this.header[OFF.fxVer] === FX_VERSION) return false;
+    for (let c = 0; c < K.channels; c++) this.setSend(c, 0);
+    RV_DEFAULTS.forEach((v, i) => this.setMaster(RV.return + i, v));
+    this.header[OFF.fxVer] = FX_VERSION;
+    return true;
+  }
 
   // Same defaults as song_clear() in src/engine/song.h.
   clear() {
@@ -238,7 +304,7 @@ export class Song {
     this.tempo = 120;
     this.swing = 50;
     this.songLen = 1;
-    this.cvZero = 36;
+    this.cvZero = CV_ZERO_NOTE;
     for (let p = 0; p < K.patterns; p++) this.setPatLen(p, 16);
     for (let i = 0; i < K.entries; i++) this.setEntry(i, i < K.patterns ? i : 0, 1);
     const engines = [0, 5, 3, 1], decays = [62, 48, 40, 80];
@@ -255,6 +321,8 @@ export class Song {
     for (let i = 0; i < K.inTracks; i++) { this.setMix(4 + i, 6, VCA_SRC.auto); this.setMix(4 + i, 7, 8); }
     this.setMacroCvMask(0, 0x0f); this.setMacroCvMask(1, 0x0f);
     this.setMaster(0, 120); this.setMaster(1, 10); this.setMaster(2, 64);
+    RV_DEFAULTS.forEach((v, i) => this.setMaster(RV.return + i, v));
+    this.header[OFF.fxVer] = FX_VERSION;
   }
 
   toJSON() {
@@ -280,6 +348,8 @@ export class Song {
     } else {
       throw new Error('Bad pattern data size');
     }
+    s.normalizeCv(); // files from editor <= 0.3.1 (C2 = 0 V, CV velocity)
+    s.migrateFx(); // files from editor <= 0.3.2: no reverb fields
     return s;
   }
 }
@@ -341,7 +411,9 @@ export const msg = {
   setDrum: (v, p, x) => frame(CMD.SetDrum, [v, p, x]),
   setCv: (t, p, x) => frame(CMD.SetCv, [t, p, x]),
   setMix: (ch, p, x) => frame(CMD.SetMix, [ch, p, x]),
+  setSend: (ch, x) => frame(CMD.SetMix, [ch, MIX_SEND, x]), // v6
   setMaster: (p, x) => frame(CMD.SetMaster, [p, x]),
+  setLiveMute: (which, on) => frame(CMD.SetMaster, [which === 'master' ? 9 : 8, on ? 127 : 0]), // v7
   setEntry: (i, pat, rep) => frame(CMD.SetEntry, [i, pat, rep]),
   setSongLen: (n) => frame(CMD.SetSongLen, [n]),
   setTempo: (bpm) => frame(CMD.SetTempo, [bpm >> 7, bpm & 127]),
@@ -401,12 +473,14 @@ export function decode(data) {
         mode: p[0], entry: p[1], pattern: p[2], row: p[3], rep: p[4], slot: p[5], flags: p[6],
         extClock: !!(p[6] & 1), nextQueued: !!(p[6] & 2), swapPending: !!(p[6] & 4),
         knobWaiting: !!(p[6] & 8), selectPage: !!(p[6] & 16),
+        reverbMuted: !!(p[6] & 32), masterMuted: !!(p[6] & 64), // v7
         tempo: p[7] * 128 + p[8], swing: p[9],
         macros: [p[10] - 64, p[11] - 64, p[12] - 64],
         cvNotes: [p[13], p[14]], gates: [!!(p[15] & 1), !!(p[15] & 2)], inGates: [!!(p[15] & 4), !!(p[15] & 8)],
         cpu: p[16], cpuPeak: p[17],
         peaks: Array.from(p.slice(18, 26)),
         hits: p[26], swaps: p[27],
+        reverbPeak: p.length >= 29 ? p[28] : 0, // v6
       };
     }
     case CMD.Panel: {
@@ -471,12 +545,14 @@ export class DumpCollector {
       if (m.track > this.maxTrack) this.maxTrack = m.track;
       for (let i = 0; i < m.count; i++) {
         const o = i * m.width, c = m.cells;
-        this.song.setCell(m.pattern, m.track, m.row + i, m.width === 6 ? fxFrom6(c, o) : { note: c[o], vel: c[o + 1], fx: c[o + 2], fxv: c[o + 3] });
+        this.song.setCellRaw(m.pattern, m.track, m.row + i, m.width === 6 ? fxFrom6(c, o) : { note: c[o], vel: c[o + 1], fx: c[o + 2], fxv: c[o + 3] });
       }
       this.chunks++;
     } else if (m.type === 'dumpEnd' && this.gotHeader) {
       this.done = true;
       if (this.legacy) this.song.migrateHeaderV2(); // firmware 0.1/0.2: IN tracks empty, VCAs follow the CV gates
+      this.cvConverted = this.song.normalizeCv();  // firmware <= 0.3.1: C2 = 0 V -> C0 = 0 V
+      this.song.migrateFx();                       // firmware <= 0.3.2: no reverb fields
       return this.song;
     }
     return null;
@@ -497,8 +573,8 @@ export function demoSong() {
     if (r % 2 === 0) set(p, 2, r, 80, r % 4 === 2 ? 100 : 50);
   }
   const pluck = [48, 0, 0, 55, 0, 0, 51, 0, 48, 0, 58, 0, 0, 55, 0, 0];
-  const vco1 = [36, 0, 0, 0, 43, 0, 0, 0, 39, 0, 0, 0, 41, 0, 43, 0];
-  const vco2 = [60, 0, 63, 0, 67, 0, 63, 0, 60, 0, 70, 0, 67, 0, 63, 0];
+  const vco1 = [12, 0, 0, 0, 19, 0, 0, 0, 15, 0, 0, 0, 17, 0, 19, 0]; // C0 = 0 V
+  const vco2 = [36, 0, 39, 0, 43, 0, 39, 0, 36, 0, 46, 0, 43, 0, 39, 0];
   for (let r = 0; r < 16; r++) {
     if (pluck[r]) set(0, 3, r, pluck[r], 96);
     if (vco1[r]) set(0, 4, r, vco1[r]);
@@ -511,7 +587,7 @@ export function demoSong() {
   set(1, 3, 0, 43, 110, FX.D.code, 100);
   set(1, 3, 8, 46, 90);
   for (let r = 8; r < 16; r++) set(2, 1, r, 45 + r, 40 + r * 5);
-  set(2, 4, 0, 36, 0, FX.G.code, 64);
+  set(2, 4, 0, 12, 0, FX.G.code, 64);
   set(2, 5, 0, NOTE_OFF);
   set(2, 2, 15, 84, 70, FX.R.code, 4);
   s.setMix(4, 6, VCA_SRC.inTrack); s.setMix(4, 4, 40); // IN1 on its own track

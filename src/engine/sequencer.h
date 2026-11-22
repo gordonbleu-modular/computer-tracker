@@ -18,6 +18,7 @@ struct DrumEvent {
     uint8_t note;   // kNoteOff = choke
     uint8_t vel;
     uint8_t decay, a, b;   // per-step locks from the FX columns, kNoLock = none
+    uint8_t send = kNoLock;   // (0.4.1) W effect: reverb send for this hit
 };
 
 struct ClockIn {
@@ -93,6 +94,7 @@ public:
         }
         for (int c = 0; c < kCvTracks; ++c) { cv_[c].gate = false; cv_[c].gate_off = 0; cv_[c].retrig = 0; cv_[c].rat_left = 0; }
         for (auto& v : in_) { v.gate = false; v.gate_off = 0; v.retrig = 0; }
+        cv_work_ = true;
         for (auto& p : pend_) p.countdown = 0;
         for (auto& r : rat_) r.left = 0;
         sched_ = 0;
@@ -118,6 +120,7 @@ public:
     // Panel macro offsets (-64..63) for the CV tracks: Main = gate length, X = glide.
     void set_macros(int m_decay, int m_colour) { m_decay_ = m_decay; m_colour_ = m_colour; }
 
+    bool drum_queued() const { return q_head_ != q_tail_; }
     // Drum events for the engine, consumed by pop_drum().
     bool pop_drum(DrumEvent& e) {
         if (q_head_ == q_tail_) return false;
@@ -143,7 +146,10 @@ public:
     // True if the last tick() started a note or scheduled one (a busy sample).
     bool worked() const { return worked_; }
 
-    bool tick(const ClockIn& in) {
+    // allow_work = false: this sample already carries a heavy job (a drum
+    // trigger or a Modal setup step), so the row read and scheduled events
+    // wait for the next free sample (the clock itself never waits).
+    bool tick(const ClockIn& in, bool allow_work = true) {
         ++now_;
         worked_ = false;
         refresh_tempo(false);
@@ -184,22 +190,21 @@ public:
             if (!first_) advance();
             first_ = false;
             row_track_ = 0;
-            row_sub_ = 0;
             ++rows_played_;
         }
-        // The row's tracks are read one every other sample (12 samples =
-        // 250 us); the engine starts the resulting drum hits on the samples
-        // in between, so a busy row never piles up in one audio interrupt.
-        if (row_track_ < kTracks) {
-            if ((row_sub_ ^= 1) != 0) {
+        // One heavy job per sample: a due scheduled (delayed / ratcheted)
+        // event first, else the next track of the row. The engine starts the
+        // resulting drum hit on the following sample (and blocks this work
+        // while it does, see allow_work), so a busy row never piles up in one
+        // audio interrupt. Shifts stay a few samples (<< 1 ms), deterministic.
+        if (allow_work) {
+            if (sched_ && static_cast<int32_t>(now_ - next_due_) >= 0) {
+                run_scheduled();
+            } else if (row_track_ < kTracks) {
                 if (playing()) play_track(row_track_);
                 ++row_track_;
             }
         }
-
-        // Scheduled (delayed / ratcheted) events: one compare per sample
-        // until the earliest one is due.
-        if (sched_ && static_cast<int32_t>(now_ - next_due_) >= 0) run_scheduled();
         update_cv();
         return row_now && playing();
     }
@@ -208,11 +213,13 @@ public:
     int32_t cv_mv(int c) const { return cv_[c].mv; }
     bool gate(int c) const { return cv_[c].gate && cv_[c].retrig == 0; }
     uint8_t cv_note(int c) const { return cv_[c].note; }
-    uint8_t cv_vel(int c) const { return cv_[c].vel; }   // last note's velocity, 0 = default
     // IN tracks: VCA gate, level (velocity, 0 = default/full) and per-step decay lock.
     bool in_gate(int i) const { return in_[i].gate && in_[i].retrig == 0; }
     uint8_t in_vel(int i) const { return in_[i].vel; }
     uint8_t in_decay_lock(int i) const { return in_[i].decay_lock; }
+    // (0.4.1) The W effect of an IN trigger changed: true once, then false.
+    bool take_in_send_change() { const bool d = in_send_dirty_; in_send_dirty_ = false; return d; }
+    uint8_t in_send_lock(int i) const { return in_[i].send_lock; }
 
 private:
     struct CvState {
@@ -224,8 +231,8 @@ private:
         bool gate = false;
         int32_t mv = 0;
         uint8_t note = 0;
-        uint8_t vel = 0;
         int32_t rat_left = 0;
+        int32_t rel = INT32_MIN;  // pitch input of the last mv computation
     };
     struct InState {
         int32_t gate_off = 0;     // samples until the VCA gate falls (0 = hold)
@@ -233,40 +240,50 @@ private:
         bool gate = false;
         uint8_t vel = 0;
         uint8_t decay_lock = kNoLock;
+        uint8_t send_lock = kNoLock;   // (0.4.1) W effect of the last trigger
     };
     struct Pending { int32_t countdown = 0; uint32_t at = 0; Cell cell{}; };   // countdown > 0 = active
     struct Ratchet { int32_t left = 0, interval = 0; uint32_t at = 0; Cell cell{}; };
 
     // Something on track t is due at sample `at` (a counter value of now_).
+    // (A track has either a delayed note or a ratchet pending, never both.)
     void schedule(int t, uint32_t at) {
         if (!sched_ || static_cast<int32_t>(at - next_due_) < 0) next_due_ = at;
         sched_ |= 1u << t;
+        due_[t] = at;
     }
 
     // Fires at most one due event per sample (others follow on the next
     // samples, ~21 us each), so coinciding ratchets never pile up in one
     // audio interrupt. Ratchet times stay on their grid.
+    // due_[t] caches each track's next event time, so the scan for the next
+    // due time is one compare per scheduled track (0.4.0, same order/timing).
     void run_scheduled() {
         uint32_t still = 0;
         uint32_t next = now_ + 0x40000000u;
         bool fired = false;
         for (int t = 0; t < kTracks; ++t) {
-            if (!(sched_ & (1u << t))) continue;
-            Pending& p = pend_[t];
-            if (!fired && p.countdown > 0 && static_cast<int32_t>(now_ - p.at) >= 0) {
-                p.countdown = 0;
-                fire_with_ratchet(t, p.cell);
-                fired = true;
+            const uint32_t bit = 1u << t;
+            if (!(sched_ & bit)) continue;
+            if (!fired && static_cast<int32_t>(now_ - due_[t]) >= 0) {
+                Pending& p = pend_[t];
+                Ratchet& r = rat_[t];
+                if (p.countdown > 0 && static_cast<int32_t>(now_ - p.at) >= 0) {
+                    p.countdown = 0;
+                    fire_with_ratchet(t, p.cell);
+                    fired = true;
+                } else if (r.left > 0 && static_cast<int32_t>(now_ - r.at) >= 0) {
+                    --r.left;
+                    r.at += static_cast<uint32_t>(r.interval);
+                    fire(t, r.cell, true);
+                    fired = true;
+                }
+                if (p.countdown > 0) due_[t] = p.at;
+                else if (r.left > 0) due_[t] = r.at;
+                else continue;   // nothing left on this track
             }
-            Ratchet& r = rat_[t];
-            if (!fired && r.left > 0 && static_cast<int32_t>(now_ - r.at) >= 0) {
-                --r.left;
-                r.at += static_cast<uint32_t>(r.interval);
-                fire(t, r.cell, true);
-                fired = true;
-            }
-            if (p.countdown > 0) { still |= 1u << t; if (static_cast<int32_t>(p.at - next) < 0) next = p.at; }
-            if (r.left > 0) { still |= 1u << t; if (static_cast<int32_t>(r.at - next) < 0) next = r.at; }
+            still |= bit;
+            if (static_cast<int32_t>(due_[t] - next) < 0) next = due_[t];
         }
         sched_ = still;
         next_due_ = next;
@@ -367,13 +384,14 @@ private:
     void fire(int t, const Cell& c, bool repeat) {
         if (c.note == kNoteEmpty) return;
         worked_ = true;
+        if (t >= kDrumTracks) cv_work_ = true;
         if (t < kDrumTracks) {
             const int nh = (q_head_ + 1) % kQueue;
             if (nh == q_tail_) return;   // queue full: drop
-            const int d = fx_get(c, FxDecay), a = fx_get(c, FxParamA), b = fx_get(c, FxParamB);
+            const int d = fx_get(c, FxDecay), a = fx_get(c, FxParamA), b = fx_get(c, FxParamB), w = fx_get(c, FxSend);
             q_[q_head_] = DrumEvent{static_cast<uint8_t>(t), c.note, c.vel ? c.vel : static_cast<uint8_t>(100),
                                     static_cast<uint8_t>(d < 0 ? kNoLock : d), static_cast<uint8_t>(a < 0 ? kNoLock : a),
-                                    static_cast<uint8_t>(b < 0 ? kNoLock : b)};
+                                    static_cast<uint8_t>(b < 0 ? kNoLock : b), static_cast<uint8_t>(w < 0 ? kNoLock : w)};
             q_head_ = nh;
             return;
         }
@@ -390,7 +408,6 @@ private:
         int glide_amt = slide_fx >= 0 ? slide_fx : prm[CpGlide];
         if (macro_on_cv(*song_, MacroColour, c_idx)) glide_amt = clampi(glide_amt + m_colour_, 0, 127);
         cv.note = c.note;
-        cv.vel = c.vel;
         cv.target = (c.note + (prm[CpTranspose] - 64)) * 256;
         if (glide_amt > 0 && cv.gate && !repeat) {
             const int32_t samples = 48 + glide_amt * glide_amt * 6;    // up to ~2 s
@@ -430,10 +447,18 @@ private:
         v.vel = c.vel;
         const int d = fx_get(c, FxDecay);
         v.decay_lock = static_cast<uint8_t>(d < 0 ? kNoLock : d);
+        const int w = fx_get(c, FxSend);
+        const uint8_t sl = static_cast<uint8_t>(w < 0 ? kNoLock : w);
+        if (sl != v.send_lock) { v.send_lock = sl; in_send_dirty_ = true; }
         v.gate_off = gate_samples(c, song_->mix[kDrumTracks + i][MpInGate], false);
     }
 
     void update_cv() {
+        // Nothing counting down, no glide, same transposition: the outputs
+        // cannot change (fire() and stop() set cv_work_ again).
+        if (!cv_work_ && transpose_ == cv_tr_) return;
+        cv_tr_ = transpose_;
+        uint32_t busy = 0;
         for (int c = 0; c < kCvTracks; ++c) {
             CvState& cv = cv_[c];
             if (cv.retrig > 0) --cv.retrig;
@@ -445,7 +470,15 @@ private:
                     cv.step = 0;
                 }
             }
-            const int32_t rel = cv.pitch + (transpose_ - song_->cv_zero_note) * 256;
+            // C0 (kCvZeroNote) = 0 V. Transposition (track knob, CV In 1) can
+            // leave 0..6 V: fold by octaves so the output never goes negative
+            // and the note keeps its pitch class.
+            int32_t rel = cv.pitch + (transpose_ - kCvZeroNote) * 256;
+            busy |= static_cast<uint32_t>(cv.retrig | cv.gate_off | cv.step);
+            if (rel == cv.rel) continue;   // unchanged: same millivolts as last sample
+            cv.rel = rel;
+            while (rel < 0) rel += 12 * 256;
+            while (rel > kCvTopQ8) rel -= 12 * 256;
             int32_t mv = (rel * 21333) >> 16;          // 1000 mV / (12 * 256)
             cv.mv = clamp32(mv, 0, 6000);
         }
@@ -453,9 +486,12 @@ private:
             if (!v.gate) continue;
             if (v.retrig > 0) --v.retrig;
             if (v.gate_off > 0 && --v.gate_off == 0) v.gate = false;
+            busy |= static_cast<uint32_t>(v.retrig | v.gate_off);
         }
+        cv_work_ = busy != 0;
     }
 
+    static constexpr int32_t kCvTopQ8 = (kCvNoteMax - kCvZeroNote) * 256 + 255;   // just below 6 V
     const Song* song_ = nullptr;
     const Song* pending_ = nullptr;
     bool swapped_ = false;
@@ -467,11 +503,11 @@ private:
     int cached_bpm_ = -1, cached_swing_ = -1;
     int row_len_ = 6000, row_len_internal_ = 6000;
     bool clock_ext_ = false;
+    bool in_send_dirty_ = false;
     uint32_t since_edge_ = 0;
     int32_t row_delay_ = 0;
     uint32_t rows_played_ = 0;
     int row_track_ = kTracks;
-    int row_sub_ = 0;
     int transpose_ = 0;
     int m_decay_ = 0, m_colour_ = 0;
     bool worked_ = false;
@@ -480,6 +516,9 @@ private:
     uint32_t next_due_ = 0;   // earliest scheduled sample (valid while sched_ != 0)
     Pending pend_[kTracks];
     Ratchet rat_[kTracks];
+    bool cv_work_ = true;
+    uint32_t due_[kTracks] = {};
+    int cv_tr_ = 0;
     CvState cv_[kCvTracks];
     InState in_[kInTracks];
     DrumEvent q_[kQueue];

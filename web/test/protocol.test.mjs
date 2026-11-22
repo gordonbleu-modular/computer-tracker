@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Song, msg, decode, frame, CMD, K, OFF, DumpCollector, uploadMessages, demoSong, noteName,
-  FX, FX_BY_CODE, fxFor, pctOf, pctTo, fxShow, fxStore, velShow, velStore, VCA_SRC, effectiveCv, effectiveIn } from '../js/protocol.js';
+  FX, FX_BY_CODE, fxFor, pctOf, pctTo, fxShow, fxStore, velShow, velStore, VCA_SRC, effectiveCv, effectiveIn, NOTE_OFF } from '../js/protocol.js';
 
 test('header layout matches the firmware (212 bytes)', () => {
   assert.equal(OFF.master + 8, K.headerBytes);
@@ -124,9 +124,12 @@ test('0-99 display values map to 0-127 and back exactly', () => {
 
 test('effects per track kind', () => {
   const letters = (t) => fxFor(t).map(([l]) => l).join('');
-  assert.equal(letters(0), 'ABDRPK');
-  assert.equal(letters(4), 'GSRPK');
-  assert.equal(letters(6), 'DGRPK');
+  assert.equal(letters(0), 'ABDRPKW');
+  assert.equal(letters(4), 'GSRPK');   // CV tracks are not in the mix: no W
+  assert.equal(letters(6), 'DGRPKW');
+  // W (0.4.1): ASCII 'W' like FxSend in song.h, value 00-99 <-> 0-127
+  assert.equal(FX.W.code, 'W'.charCodeAt(0));
+  assert.equal(fxStore(FX.W.code, 99), 127); assert.equal(fxShow(FX.W.code, 127), 99); assert.equal(fxStore(FX.W.code, 50), 64);
   for (const f of Object.values(FX)) assert.ok(f.name && f.help && FX_BY_CODE[f.code]);
 });
 
@@ -183,6 +186,29 @@ test('status decode', () => {
   assert.deepEqual(st.inGates, [false, false]);
   assert.equal(st.cpu, 40);
   assert.deepEqual(st.peaks, [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(st.reverbPeak, 0); // 0.3.2 firmware: no reverb meter byte
+  assert.equal(decode(frame(CMD.Status, [...pl, 77])).reverbPeak, 77); // v6
+});
+
+test('v6: reverb fields, defaults and migration of older songs', async () => {
+  const { RV, RV_DEFAULTS, OFF, msg, Song } = await import('../js/protocol.js');
+  const s = new Song();
+  assert.equal(s.fxVer, 1);
+  RV_DEFAULTS.forEach((v, i) => assert.equal(s.master(RV.return + i), v));
+  for (let c = 0; c < 6; c++) assert.equal(s.send(c), 0); // new songs start dry
+  s.setSend(2, 200);
+  assert.equal(s.send(2), 127);
+  assert.deepEqual(Array.from(msg.setSend(5, 33)), [0xf0, 0x7d, 0x54, 0x15, 5, 8, 33, 0xf7]);
+  // A song file from editor 0.3.2 (reserved bytes 0) gets sends 0 + defaults.
+  const j = s.toJSON();
+  j.header[OFF.fxVer] = 0; j.header[OFF.fxSend + 2] = 50; j.header[OFF.master + RV.decay] = 0;
+  const old = Song.fromJSON(j);
+  assert.equal(old.send(2), 0);
+  assert.equal(old.master(RV.decay), RV_DEFAULTS[2]);
+  assert.equal(old.fxVer, 1);
+  // A 0.4.0 file keeps its values.
+  const keep = Song.fromJSON(s.toJSON());
+  assert.equal(keep.send(2), 127);
 });
 
 test('foreign sysex is ignored', () => {
@@ -194,4 +220,75 @@ test('note names', () => {
   assert.equal(noteName(61), 'C#4');
   assert.equal(noteName(0), '---');
   assert.equal(noteName(127), 'OFF');
+});
+
+// ------------------------------------------------------------- 0.3.2 CV ----
+test('CV tracks: C0 = 0 V, no velocity, notes folded into C0..B5', async () => {
+  const { CV_ZERO_NOTE, CV_NOTE_MIN, CV_NOTE_MAX, cvFold, cvVolts } = await import('../js/protocol.js');
+  assert.equal(CV_ZERO_NOTE, 12);
+  assert.equal(cvVolts(12), 0);
+  assert.equal(cvVolts(24), 1);
+  assert.ok(cvVolts(CV_NOTE_MAX) < 6);
+  assert.equal(cvFold(6), 18);
+  assert.equal(cvFold(100), 76);
+  const s = new Song();
+  assert.equal(s.cvZero, 12);
+  s.setCell(0, 4, 0, { note: 100, vel: 90, fx: 0, fxv: 0 });
+  assert.deepEqual(s.getCell(0, 4, 0), { note: 76, vel: 0, fx: 0, fxv: 0 });
+  s.setCell(0, 4, 1, { note: NOTE_OFF, vel: 90, fx: 0, fxv: 0 });
+  assert.equal(s.getCell(0, 4, 1).note, NOTE_OFF);
+  s.setCell(0, 0, 0, { note: 100, vel: 90, fx: 0, fxv: 0 }); // drums keep their range and velocity
+  assert.deepEqual(s.getCell(0, 0, 0), { note: 100, vel: 90, fx: 0, fxv: 0 });
+  // Demo: every CV note in range.
+  const d = demoSong();
+  for (let p = 0; p < K.patterns; p++) for (let t = 4; t < 6; t++) for (let r = 0; r < K.rows; r++) {
+    const c = d.getCell(p, t, r);
+    assert.equal(c.vel, 0);
+    if (c.note && c.note !== NOTE_OFF) assert.ok(c.note >= CV_NOTE_MIN && c.note <= CV_NOTE_MAX);
+  }
+});
+
+test('songs from <= 0.3.1 (C2 = 0 V) keep their CV voltages', () => {
+  const s = new Song();
+  s.cvZero = 36;
+  s.setCellRaw(0, 4, 0, { note: 36, vel: 80, fx: 0, fxv: 0 }); // 0 V
+  s.setCellRaw(0, 4, 1, { note: 50, vel: 0, fx: 0, fxv: 0 });  // D3 old = 14 st above 0 V
+  s.setCellRaw(0, 5, 2, { note: 30, vel: 0, fx: 0, fxv: 0 });  // below the old 0 V note
+  s.setCellRaw(0, 5, 3, { note: 120, vel: 0, fx: 0, fxv: 0 }); // above 6 V
+  s.setCellRaw(0, 6, 0, { note: 30, vel: 70, fx: 0, fxv: 0 }); // IN track: untouched
+  assert.equal(s.normalizeCv(), true);
+  assert.equal(s.cvZero, 12);
+  assert.deepEqual(s.getCell(0, 4, 0), { note: 12, vel: 0, fx: 0, fxv: 0 });
+  assert.equal(s.getCell(0, 4, 1).note, 26);
+  assert.equal(s.getCell(0, 5, 2).note, 18);
+  assert.equal(s.getCell(0, 5, 3).note, 72);
+  assert.deepEqual(s.getCell(0, 6, 0), { note: 30, vel: 70, fx: 0, fxv: 0 });
+  assert.equal(s.normalizeCv(), false); // idempotent
+  // An old song file is converted on import.
+  const old = new Song();
+  old.header[16] = 36;
+  old.setCellRaw(1, 5, 0, { note: 48, vel: 0, fx: 0, fxv: 0 });
+  const back = Song.fromJSON(JSON.parse(JSON.stringify(old.toJSON())));
+  assert.equal(back.getCell(1, 5, 0).note, 24);
+  assert.equal(back.cvZero, 12);
+});
+
+test('v7: live mutes (SetMaster 8/9, Status flags 32/64), not stored in the song', async () => {
+  const { MASTER_MUTE, PROTOCOL_VERSION } = await import('../js/protocol.js');
+  assert.equal(PROTOCOL_VERSION, 7);
+  assert.deepEqual(MASTER_MUTE, { reverb: 8, master: 9 });
+  assert.deepEqual([...msg.setLiveMute('reverb', true)], [...frame(CMD.SetMaster, [8, 127])]);
+  assert.deepEqual([...msg.setLiveMute('master', false)], [...frame(CMD.SetMaster, [9, 0])]);
+  const pl = [1, 2, 3, 4, 0, 5, 32 | 64 | 1, 0, 120, 56, 64, 70, 60, 36, 48, 3, 40, 55, 1, 2, 3, 4, 5, 6, 7, 8, 5, 9, 70];
+  const st = decode(frame(CMD.Status, pl));
+  assert.equal(st.reverbMuted, true);
+  assert.equal(st.masterMuted, true);
+  assert.equal(st.extClock, true);
+  pl[6] = 32;
+  const s2 = decode(frame(CMD.Status, pl));
+  assert.equal(s2.reverbMuted, true);
+  assert.equal(s2.masterMuted, false);
+  pl[6] = 0;
+  const s3 = decode(frame(CMD.Status, pl)); // older firmware never sets these bits
+  assert.equal(s3.reverbMuted || s3.masterMuted, false);
 });
