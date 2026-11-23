@@ -278,7 +278,7 @@ dialog td { padding: 2px 10px 2px 0; } dialog td:first-child { color: var(--gold
 .kb-key.note.sharp i { color: var(--gold); }
 .kb-key.off { background: #2a1416; color: #eee; border-color: var(--red); }
 .kb-key.off i { color: var(--red); }
-.kb-key.octdown, .kb-key.octup { background: #2a2b2f; color: var(--silver); border-color: var(--silver2); }
+.kb-key.octdown, .kb-key.octup, .kb-key.jmpdown, .kb-key.jmpup { background: #2a2b2f; color: var(--silver); border-color: var(--silver2); }
 .kb-key.octdown i, .kb-key.octup i { color: var(--silver); }
 .kb-key.press { outline: 2px solid var(--red); box-shadow: 0 0 6px var(--redglow); }
 .kbd-help { font-size: 11px; padding: 4px 0 6px; container-type: inline-size; width: 560px; max-width: 100%; }
@@ -441,3 +441,20 @@ dialog td { padding: 2px 10px 2px 0; } dialog td:first-child { color: var(--gold
 .module.drum .krow.three .kface { width: min(var(--k-s), 2.9rem); height: min(var(--k-s), 2.9rem); }
 .module.drum .krow.three .klabel { letter-spacing: .02em; }
 .module.drum .knob.kx .kval-arc { stroke: #e0662b; }
+/* the slot pill never changes width (no line break in the toolbar):
+   the edited / pending marker sits in a reserved cell. */
+.pill.slotnow { display: inline-flex; align-items: center; gap: 4px; min-width: 6.2em; box-sizing: border-box; overflow: hidden; }
+.pill.slotnow > span { display: inline-flex; align-items: baseline; white-space: nowrap; }
+.pill.slotnow > span > b { margin-left: .45em; }
+.pill.slotnow .mark { display: inline-block; width: 1.1em; text-align: center; font-style: normal; color: var(--gold); }
+.pill.slotnow.dirty .mark { color: var(--red); text-shadow: 0 0 4px var(--redglow); }
+.toolbar .group { flex-wrap: nowrap; white-space: nowrap; }
+#songName { text-overflow: ellipsis; }
+/* the module that belongs to the grid's current track is framed on
+   every faceplate (the faceplates set their own box-shadow, which used to
+   override the old highlight on all panels but the Kick). */
+.module.sel::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 3; border-radius: 2px;
+  border: 2px solid var(--gold);
+  box-shadow: inset 0 0 0 1px #000c, inset 0 0 14px rgba(209, 169, 79, .45);
+}

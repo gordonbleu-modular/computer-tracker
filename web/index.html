@@ -50,8 +50,8 @@
     <button id="btnRestore" title="Restore the song the browser had before connecting" hidden>Restore</button>
   </div>
   <div class="group">
-    <label>OCT <select id="octave"></select></label>
-    <label title="Step jump: how many rows the cursor moves after you enter a note or value (0 = stay on the row)">STEP JUMP <select id="step"></select></label>
+    <label title="Octave for the note keys: - / = or Ctrl+Shift+↓ / ↑">OCT <select id="octave"></select></label>
+    <label title="Step jump: how many rows the cursor moves after you enter a note or value (0 = stay on the row). Keys: [ / ] (QWERTZ: Ü / +) or Ctrl+Shift+← / →">STEP JUMP <select id="step"></select></label>
     <label><input id="editMode" type="checkbox" checked> EDIT</label>
     <label><input id="follow" type="checkbox" checked> FOLLOW</label>
     <button id="btnKbd" title="Show / hide the keyboard sketch under the grid (which key plays which note)">⌨</button>
@@ -131,7 +131,9 @@
     <tr><td>Shift+↑ / ↓, Shift+PgUp / PgDn</td><td>value ±1 / ±10 (note column: semitone / octave)</td></tr>
     <tr><td>Enter or click on FX</td><td>list of effects for this track (or type the letter: A B D G S R P K W)</td></tr>
     <tr><td>Delete / Backspace</td><td>clear field (whole cell in the note column)</td></tr>
-    <tr><td>- / =</td><td>octave down / up</td></tr>
+    <tr><td>- / = &nbsp;or&nbsp; Ctrl+Shift+↓ / ↑</td><td>octave down / up (any column; Mac: Cmd or Ctrl)</td></tr>
+    <tr><td>[ / ] (QWERTZ: Ü / +) &nbsp;or&nbsp; Ctrl+Shift+← / →</td><td>step jump down / up</td></tr>
+    <tr><td>Esc</td><td>back to the grid (also from the song name and other fields)</td></tr>
     <tr><td>Space</td><td>play pattern / stop</td></tr>
     <tr><td>Enter (NOTE / VEL column)</td><td>play song</td></tr>
     <tr><td>Ctrl+C / Ctrl+V</td><td>copy / paste the track in this pattern</td></tr>
@@ -141,8 +143,13 @@
     <tr><td>Drag up / down</td><td>change (Shift = fine)</td></tr>
     <tr><td>Mouse wheel</td><td>change (Shift = single steps)</td></tr>
     <tr><td>Double-click / Delete</td><td>back to default</td></tr>
-    <tr><td>Arrows, PgUp/PgDn, Home/End</td><td>keyboard control when focused</td></tr>
+    <tr><td>Arrows, PgUp/PgDn, Home/End</td><td>keyboard control when the knob was reached with Tab</td></tr>
   </table>
+  <h3>Focus</h3>
+  <p class="dim">After you click a knob, dropdown, button or checkbox, the next key goes back to the grid and acts there
+  (an arrow moves the cursor, a note key enters a note, Space plays). Text and number fields keep their keys; Esc leaves them.
+  A control reached with Tab keeps its own keys (knob: arrows, PgUp/PgDn, Home/End, Delete; dropdown: arrows, Space, Enter;
+  button: Space, Enter); all other keys still go to the grid.</p>
   <p class="dim">Keys work by position, so on a German (QWERTZ) keyboard the bottom row starts at Y; the sketch shows your letters.
   CV tracks have no VEL column (a gate is on or off) and play C0–B5 = 0–5.92 V, so the octave stops at 5 there.
   Gold arc = value stored in the song. Red arc and dot = what the module plays right now with its PERFORM

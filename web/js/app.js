@@ -10,6 +10,7 @@ import { Device } from './midi.js';
 import { Knob } from './knob.js';
 import { MeterBallistics } from './meter.js';
 import { NOTE_KEYS, renderKeyboard, detectLayout } from './keyboard.js';
+import { shortcutFor, routeKey, targetKind } from './keys.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -411,11 +412,21 @@ function fieldValue(c, sub) {
   return { code, show: fxShow(code, c.fxv), store: (d) => ({ ...c, fxv: fxStore(code, d) }) };
 }
 
-function onGridKey(e) {
+function onGridKey(e, routed = false) {
   if (picker.el) { onPickerKey(e); return; }
-  if (e.target.closest('input,select,textarea') && e.target !== $('grid')) return;
+  if (!routed && e.target.closest('input,select,textarea') && e.target !== $('grid')) return;
   const k = e.code;
   const ctrl = e.ctrlKey || e.metaKey;
+  const sc = shortcutFor(e);
+  if (sc) {
+    e.preventDefault();
+    if (sc.type === 'octave') {
+      const top = trackKind(state.track) === 'cv' ? CV_OCT_MAX : 8;
+      setOctave(clamp(keyOctave(state.track) + sc.d, 0, top));
+    }
+    else setStep(state.step + sc.d);
+    return;
+  }
   if (ctrl && k === 'KeyC') { copyTrack(); e.preventDefault(); return; }
   if (ctrl && k === 'KeyV') { pasteTrack(); e.preventDefault(); return; }
   if (ctrl) return;
@@ -451,8 +462,6 @@ function onGridKey(e) {
       else send(msg.playSong(0));
       e.preventDefault();
       return;
-    case 'Minus': if (state.sub === 0) { setOctave(keyOctave(state.track) - 1); e.preventDefault(); } return;
-    case 'Equal': if (state.sub === 0) { setOctave(state.octave + 1); e.preventDefault(); } return;
     default: break;
   }
   if (k === 'Delete' || k === 'Backspace') {
@@ -512,6 +521,28 @@ function defaultFxValue(L) {
   return { R: 2, P: 50, G: 8, S: 25, K: 8 }[L] ?? 64;
 }
 
+// Keys pressed while another control has the focus go back to the grid
+// (rules in keys.js). Remember whether a control got its focus from the
+// mouse or from the keyboard.
+function wireKeyRouting(grid) {
+  let pointer = false;
+  document.addEventListener('pointerdown', () => { pointer = true; }, true);
+  document.addEventListener('keydown', () => { pointer = false; }, true);
+  document.addEventListener('focusin', (e) => {
+    if (e.target && e.target.dataset) e.target.dataset.via = pointer ? 'pointer' : 'keyboard';
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return;
+    const t = document.activeElement;
+    const kind = targetKind(t, grid);
+    const what = routeKey(e, kind, t && t.dataset ? t.dataset.via : 'keyboard');
+    if (what === 'native') return;
+    e.preventDefault();
+    grid.focus({ preventScroll: true });
+    if (what === 'grid') onGridKey(e, true);
+  });
+}
+
 function copyTrack() {
   const arr = [];
   for (let r = 0; r < K.rows; r++) arr.push(state.song.getCell(state.pattern, state.track, r));
@@ -537,7 +568,16 @@ function togglePlayPattern() {
   if (!dev.connected) toast('Not connected: connect the module to hear it');
 }
 
-function setOctave(o) { state.octave = clamp(o, 0, 8); paintOctave(); paintKeyboard(); }
+function setOctave(o) {
+  const n = clamp(o, 0, 8);
+  if (n !== keyOctave(state.track)) toast(`Octave ${n}`, 700);
+  state.octave = n; paintOctave(); paintKeyboard();
+}
+function setStep(s) {
+  const n = clamp(s, 0, 8);
+  if (n !== state.step) toast(`Step jump ${n}`, 700);
+  state.step = n; $('step').value = n;
+}
 // Octave the note keys play on track t: CV tracks stop at 5 (C0 = 0 V ... B5 = 5.92 V).
 const keyOctave = (t) => (trackKind(t) === 'cv' ? Math.min(state.octave, CV_OCT_MAX) : state.octave);
 function keyNote(code, t) {
@@ -552,7 +592,7 @@ function paintOctave() {
   if (cv !== octCv) {
     octCv = cv;
     [...sel.options].forEach((o) => { o.disabled = cv && +o.value > CV_OCT_MAX; });
-    sel.title = cv ? 'Octave for note keys. CV tracks: 0-5 (C0 = 0 V, B5 = 5.92 V; only positive voltages).' : 'Octave for note keys (- / = keys)';
+    sel.title = (cv ? 'Octave for note keys. CV tracks: 0-5 (C0 = 0 V, B5 = 5.92 V; only positive voltages).' : 'Octave for note keys.') + ' Keys: - / = or Ctrl+Shift+↓ / ↑';
   }
   sel.value = keyOctave(state.track);
 }
@@ -1210,10 +1250,15 @@ function paintSlotNow() {
   pill.classList.toggle('on', !!st);
   pill.classList.toggle('pending', !!st && st.swapPending);
   if (!st) { lab.textContent = 'SLOT –'; pill.title = 'Connect to see which slot the module plays'; return; }
+  // Fixed width: the marker after the number has its own reserved cell, so
+  // "edited" / "pending" never changes the size of the toolbar.
   lab.innerHTML = '';
-  lab.append(document.createTextNode('SLOT '), el('b', null, String(st.slot + 1)),
-    document.createTextNode(st.swapPending ? ' → next at pattern end' : state.dirty ? ' · edited' : ''));
-  pill.title = `The module plays slot ${st.slot + 1}` + (state.dirty ? '; the editor has changes that are not saved to a slot yet' : '') +
+  const mark = el('i', 'mark', st.swapPending ? '→' : state.dirty ? '●' : '');
+  lab.append(document.createTextNode('SLOT '), el('b', null, String(st.slot + 1)), mark);
+  pill.classList.toggle('dirty', !st.swapPending && state.dirty);
+  pill.title = `The module plays slot ${st.slot + 1}` +
+    (st.swapPending ? '; → = a new slot starts at the end of the pattern' : '') +
+    (state.dirty ? '; ● = edited: the editor has changes that are not saved to a slot yet (Save to module keeps them)' : '') +
     '. Turning the slot knob on the module (SELECT page) loads the new song here too.';
 }
 
@@ -1434,7 +1479,7 @@ function wire() {
   fillSlots(0, 0);
   $('octave').value = state.octave; $('step').value = state.step;
   $('octave').onchange = () => setOctave(+$('octave').value);
-  $('step').onchange = () => { state.step = +$('step').value; };
+  $('step').onchange = () => setStep(+$('step').value);
   $('editMode').onchange = () => { state.edit = $('editMode').checked; };
   $('follow').onchange = () => { state.follow = $('follow').checked; };
   $('pattern').onchange = () => selectPattern(+$('pattern').value);
@@ -1540,7 +1585,8 @@ function wire() {
   })();
   showKeyboard((() => { try { return localStorage.getItem(KB_KEY) !== '0'; } catch { return true; } })());
   const grid = $('grid');
-  grid.addEventListener('keydown', onGridKey);
+  grid.addEventListener('keydown', (e) => onGridKey(e));
+  wireKeyRouting(grid);
   grid.addEventListener('mousedown', (e) => {
     const f = e.target.closest('span.f');
     if (!f) return;

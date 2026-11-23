@@ -13,30 +13,34 @@ export const NOTE_KEYS = {
 export const OFF_KEY = 'Digit1';
 export const OCT_DOWN = 'Minus';
 export const OCT_UP = 'Equal';
+export const JUMP_DOWN = 'BracketLeft';
+export const JUMP_UP = 'BracketRight';
 
 // Physical rows with their stagger (in key widths), like a real keyboard.
 export const KEY_ROWS = [
   { indent: 0, keys: ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0', 'Minus', 'Equal'] },
-  { indent: 0.5, keys: ['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI', 'KeyO', 'KeyP'] },
+  { indent: 0.5, keys: ['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI', 'KeyO', 'KeyP', 'BracketLeft', 'BracketRight'] },
   { indent: 0.75, keys: ['KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyK', 'KeyL'] },
   { indent: 1.25, keys: ['KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB', 'KeyN', 'KeyM', 'Comma', 'Period'] },
 ];
 
-const QWERTZ = { KeyY: 'Z', KeyZ: 'Y', Minus: 'ß', Equal: '´' };
+const QWERTZ = { KeyY: 'Z', KeyZ: 'Y', Minus: 'ß', Equal: '´', BracketLeft: 'Ü', BracketRight: '+' };
 // Printed label of a key. layoutMap: optional Map from navigator.keyboard.getLayoutMap().
 export function keyLabel(code, layout = 'qwerty', layoutMap = null) {
   if (layoutMap && layoutMap.get(code)) return layoutMap.get(code).toUpperCase();
   if (layout === 'qwertz' && QWERTZ[code]) return QWERTZ[code];
   if (code.startsWith('Key')) return code.slice(3);
   if (code.startsWith('Digit')) return code.slice(5);
-  return { Minus: '-', Equal: '=', Comma: ',', Period: '.' }[code] || code;
+  return { Minus: '-', Equal: '=', Comma: ',', Period: '.', BracketLeft: '[', BracketRight: ']' }[code] || code;
 }
 
-// What a key does: { kind: 'note' | 'off' | 'octdown' | 'octup' | 'none', semi, sharp }.
+// What a key does: { kind: 'note' | 'off' | 'octdown' | 'octup' | 'jmpdown' | 'jmpup' | 'none', semi, sharp }.
 export function keyRole(code) {
   if (code === OFF_KEY) return { kind: 'off' };
   if (code === OCT_DOWN) return { kind: 'octdown' };
   if (code === OCT_UP) return { kind: 'octup' };
+  if (code === JUMP_DOWN) return { kind: 'jmpdown' };
+  if (code === JUMP_UP) return { kind: 'jmpup' };
   if (code in NOTE_KEYS) {
     const semi = NOTE_KEYS[code];
     return { kind: 'note', semi, sharp: [1, 3, 6, 8, 10].includes(semi % 12) };
@@ -73,7 +77,7 @@ export function renderKeyboard(box, { layout, layoutMap, noteText, title, highli
       const cap = document.createElement('b');
       cap.textContent = keyLabel(code, layout, layoutMap);
       const sub = document.createElement('i');
-      sub.textContent = role.kind === 'note' ? noteText(code) : role.kind === 'off' ? 'OFF' : role.kind === 'octdown' ? 'OCT−' : role.kind === 'octup' ? 'OCT+' : '';
+      sub.textContent = role.kind === 'note' ? noteText(code) : role.kind === 'off' ? 'OFF' : role.kind === 'octdown' ? 'OCT−' : role.kind === 'octup' ? 'OCT+' : role.kind === 'jmpdown' ? 'JMP−' : role.kind === 'jmpup' ? 'JMP+' : '';
       k.append(cap, sub);
       r.appendChild(k);
     }

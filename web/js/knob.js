@@ -166,6 +166,9 @@ export class Knob {
     }, { passive: false });
     el.addEventListener('keydown', (e) => {
       if (el.classList.contains('disabled')) return;
+      // A knob clicked with the mouse leaves the keys to the tracker grid
+      // (app.js / keys.js); one reached with Tab keeps arrows etc.
+      if (el.dataset.via === 'pointer') return;
       const big = Math.max(2, Math.round((this.max - this.min) / 16));
       const map = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: big, PageDown: -big };
       if (e.key in map) this._commit(this.value + map[e.key]);
