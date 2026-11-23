@@ -29,9 +29,11 @@ constexpr uint8_t kDevice = 0x54;
 //    v7 (fw 0.4.2): SetMaster param 8 = reverb return mute, 9 = master mute
 //                (value >= 64 = muted). Live only: not stored in the song, off
 //                at power-up. Status flags bit 32 / 64 report them.
-constexpr uint8_t kProtocolVersion = 7;
+//    v8 (fw 0.4.3): drum param 6 = Kick click / grit (other engines), song fx_ver 2;
+//                the snare/clap morph needs no protocol change.
+constexpr uint8_t kProtocolVersion = 8;
 constexpr uint8_t kMasterRvMute = 8, kMasterMute = 9;
-constexpr uint8_t kFwMajor = 0, kFwMinor = 4, kFwPatch = 2;
+constexpr uint8_t kFwMajor = 0, kFwMinor = 4, kFwPatch = 3;
 constexpr uint8_t kMixSend = 8;    // SetMix pseudo-parameter: reverb send (song header fx_send)
 constexpr int kV030CellWire = 6;   // cell size in SetCell/SetCells from a 0.3.0 editor (second effect folded, see cell_from_wire)
 constexpr int kSlots = 6;

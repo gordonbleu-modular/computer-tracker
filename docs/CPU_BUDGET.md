@@ -126,6 +126,42 @@ the stack; returning the gain by value fixed that. The rest is the bench's
 code-layout noise. RAM: 182,460 bytes (69.6 %). Sound identity: unchanged
 (the renders are bit-for-bit the same as 0.4.1's).
 
+**0.4.3 (kick click, snare→clap morph, grit):** avg / max, 0.4.2 → 0.4.3:
+
+| # | Scenario | 0.4.2 | 0.4.3 | max % of 4000 |
+| --- | --- | --- | --- | --- |
+| 0 | idle | 832 / 1075 | 831 / 1072 | 27 % |
+| 1 | demo | 1464 / 1858 | 1478 / 1865 | 47 % |
+| 2 | pathological | 3104 / 3691 | 3133 / 3756 | 94 % |
+| 3 | demo + reverb | 1715 / 2183 | 1729 / 2249 | 56 % |
+| 4 | pathological + reverb | 3367 / 3944 | 3395 / 3981 | **99.5 %** |
+| 5 | reverb tail only | 1296 / 1552 | 1295 / 1549 | 39 % |
+| 6 | 4 + grit 31 on all four drums | – | 3631 / 4218 | **105 %** |
+| 7 | 4, snares at B 64 (morph), grit on the Modal voices | – | 3542 / 4130 | **103 %** |
+| 8 | 3 + click 100, snare B 64, grit 31 on drums 2–4 | – | 1835 / 2253 | 56 % |
+
+With click and grit at 0 the new code costs one byte test per trigger, one
+mask test per sample (`grit_mask_`) and a branch-free noise tap in the snare:
++0…+29 cycles avg, the worst sample of the worst case +37 (99.5 %, 0.4.2:
+98.6 %). The kick click runs as its own internal engine code only for the
+≈ 1.5 ms it sounds, so the plain kick path is the 0.4.2 code. Grit costs
+≈ 59 cycles per voice and sample while it is on (a first version inside the
+voice cost ≈ 90 and slowed every voice through the member layout; it now
+runs in the engine on the voice output, only for voices whose grit is on).
+The morph adds nothing per sample outside the trigger (the blend is set up
+once per hit; the noise tap is one multiply).
+
+**Honest reading:** real songs, even with click, morph and grit on three
+voices plus reverb (scenario 8), stay near 56 %. The synthetic pathological
+case (every voice retriggered on every row at 300 BPM, reverb at maximum)
+already sat at 98.6 % in 0.4.2; with grit on all four voices on top it goes
+over the engine budget at its peaks (max 105 %, p99 4016 cycles, so ≈ 1 % of
+the samples are over), i.e. it can crackle on hardware. ComputerCard's own interrupt overhead is not even included. Grit on
+one or two voices, or the pathological case without reverb, fits.
+RAM: 183,508 bytes (70.0 %). Sound identity: with click/grit at 0 every render
+is bit-for-bit the same as 0.4.2's, and a hash over all engines and B values
+matches except snare B 45–83 (the morph zone, changed on purpose).
+
 ### Sound identity (tools/sound_check)
 
 `tools/sound_check/render.cpp` renders single hits of every engine (normal

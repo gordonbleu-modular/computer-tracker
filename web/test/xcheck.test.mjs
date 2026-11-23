@@ -162,7 +162,7 @@ test('v6: an old header (fx version 0) is migrated the same way on both sides', 
   for (const s of [back, js]) {
     for (let c = 0; c < K.channels; c++) assert.equal(s.send(c), 0);
     RV_DEFAULTS.forEach((v, i) => assert.equal(s.master(RV.return + i), v));
-    assert.equal(s.fxVer, 1);
+    assert.equal(s.fxVer, 2);
   }
   assert.deepEqual(Buffer.from(back.header), Buffer.from(js.header));
 });
@@ -171,4 +171,21 @@ test('v7: live mutes go through the firmware parser without touching the song', 
   const s = demoSong();
   const back = roundTrip([...uploadMessages(s), msg.setLiveMute('reverb', true), msg.setLiveMute('master', true), msg.setLiveMute('master', false)]);
   assert.deepEqual(raw(back), raw(s));
+});
+
+test('v8: click/grit (drum param 6) and the fx_ver 1 -> 2 migration match the firmware', { skip }, async () => {
+  const { OFF, DRUM_X } = await import('../js/protocol.js');
+  const s = demoSong();
+  s.setDrum(0, DRUM_X, 90); s.setDrum(3, DRUM_X, 31);
+  assert.deepEqual(raw(roundTrip(uploadMessages(s))), raw(s));
+  const back = roundTrip([msg.setHeader(new Song()), msg.setDrum(1, DRUM_X, 64)]);
+  assert.equal(back.drum(1, DRUM_X), 64);
+  // a 0.4.2 header (fx_ver 1) with junk in the reserved bytes: same result on both sides
+  const old = demoSong();
+  old.header[OFF.fxVer] = 1;
+  old.header[OFF.drum + 6] = 99; old.header[OFF.drum + 15] = 12;
+  const b2 = roundTrip([msg.setHeader(old)]);
+  const js = Song.fromJSON(old.toJSON());
+  assert.deepEqual(Buffer.from(b2.header), Buffer.from(js.header));
+  assert.equal(js.drum(0, DRUM_X), 0);
 });

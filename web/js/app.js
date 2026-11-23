@@ -4,7 +4,7 @@ import {
   K, Song, msg, decode, DumpCollector, uploadMessages, demoSong, noteName, clamp,
   ENGINES, MATERIALS, FX, FX_BY_CODE, fxFor, fxShow, fxStore, velShow, velStore, trackKind,
   VCA_SRC, VCA_SRC_NAMES, NOTE_OFF, NOTE_EMPTY, PROTOCOL_VERSION, effectiveDrum, effectiveFilter, effectiveCv, effectiveIn,
-  cvFold, cvVolts, CV_NOTE_MIN, CV_NOTE_MAX, CV_OCT_MAX, RV, RV_DEFAULTS, rvSeconds,
+  cvFold, cvVolts, CV_NOTE_MIN, CV_NOTE_MAX, CV_OCT_MAX, RV, RV_DEFAULTS, rvSeconds, DRUM_X,
 } from './protocol.js';
 import { Device } from './midi.js';
 import { Knob } from './knob.js';
@@ -635,6 +635,14 @@ function jacks(names) {
   return j;
 }
 function krow(...ks) { const r = el('div', 'krow'); ks.forEach((k) => r.appendChild(k.el)); return r; }
+function krow3(...ks) { const r = krow(...ks); r.classList.add('three'); return r; }
+// 0.4.3 drum knob texts
+const fmtX = (v) => (v === 0 ? 'off' : `${Math.round((v * 100) / 127)}%`);
+const titleX = (e) => (e === 0
+  ? 'Click: a short beater click (high-passed noise + a 1.6 kHz blip, ~1.5 ms) on top of the kick, scaled with velocity. 0 = off (the kick as before).'
+  : 'Grit: lo-fi fuzz after the voice: drive x1…x16 into a hard clip, fewer bits (down to 6) and from 25 % a lower sample rate (down to 12 kHz). 0 = off (the voice as before).');
+const fmtB = (e) => (e === 5 ? (v) => (v <= 44 ? `snr ${v}` : v >= 84 ? `clap ${v}` : `${Math.round(((v - 44) * 100) / 40)}%clp`) : String);
+const titleB = (e) => (e === 5 ? 'Snare -> clap. Up to 44: snare, brighter to the right. 44…84: the snare morphs into the clap (noise colour, extra bursts). From 84: clap, bursts further apart to the right.' : '');
 
 // 0.4.2: each drum module wears a faceplate after the selected engine (look
 // only; knobs, layout and behaviour are the same for every engine).
@@ -682,23 +690,29 @@ function buildVoices() {
     const e0 = s.drum(v, 0);
     const kd = new Knob({ label: 'Decay', value: s.drum(v, 1), def: 64, fmt: fmtDecay, size: 'l', onChange: set(1) });
     const ka = new Knob({ label: ENGINES[e0].a, value: s.drum(v, 2), def: 64, fmt: fmtA(e0), onChange: set(2) });
-    const kb = new Knob({ label: ENGINES[e0].b, value: s.drum(v, 3), def: 32, onChange: set(3) });
+    const kb = new Knob({ label: ENGINES[e0].b, value: s.drum(v, 3), def: 32, fmt: fmtB(e0), onChange: set(3), title: titleB(e0) });
     const kt = new Knob({ label: 'Tune', min: 16, max: 112, value: s.drum(v, 4), def: 64, fmt: fmtSigned, size: 's', bipolar: true, onChange: set(4) });
-    const kv = new Knob({ label: 'Vel', value: s.drum(v, 5), def: 100, size: 's', onChange: set(5), title: 'Velocity sensitivity' });
-    knobs.drum[v] = [null, kd, ka, kb, kt, kv];
+    const kv = new Knob({ label: 'Vel', value: s.drum(v, 5), def: 100, size: 's', fmt: fmtPct, onChange: set(5),
+      title: 'Velocity sensitivity: how much the VEL column of a step changes this voice\'s level. 0 % = every hit at full level (VEL ignored), 100 % = VEL sets the level fully. Default 79 %.' });
+    // 0.4.3: Kick = beater click level, other engines = grit (0 = off, the old sound)
+    const kx = new Knob({ label: ENGINES[e0].x, value: s.drum(v, DRUM_X), def: 0, size: 's', fmt: fmtX, onChange: set(DRUM_X), title: titleX(e0) });
+    kx.el.classList.add('kx');
+    kx.setDisabled(dev.connected && state.proto < 8);
+    knobs.drum[v] = [null, kd, ka, kb, kt, kv, kx];
     eng.onchange = () => {
       const e = +eng.value;
       set(0)(e);
       sub.textContent = ENGINES[e].info;
       setPanelStyle(m, e);
       ka.setLabel(ENGINES[e].a); ka.setFmt(fmtA(e));
-      kb.setLabel(ENGINES[e].b);
+      kb.setLabel(ENGINES[e].b); kb.setFmt(fmtB(e)); kb.el.title = titleB(e);
+      kx.setLabel(ENGINES[e].x); kx.el.title = titleX(e);
       buildGrid();
     };
     const aud = el('button', 'audition', 'TRIG');
     aud.title = 'Play this voice on the module';
     aud.onclick = () => send(msg.preview(v, 48, 110));
-    m.append(eng, sub, routes, kd.el, krow(ka, kb), krow(kt, kv), el('div', 'spacer'), aud, m.plate);
+    m.append(eng, sub, routes, kd.el, krow(ka, kb), krow3(kt, kv, kx), el('div', 'spacer'), aud, m.plate);
     box.appendChild(m);
     voicePanels.push(m);
   }
@@ -1114,7 +1128,7 @@ function onMessage(data) {
       state.legacy = m.protocol < 2;
       if (state.proto !== Math.min(m.protocol, PROTOCOL_VERSION)) {
         state.proto = Math.min(m.protocol, PROTOCOL_VERSION);
-        buildCvIn(); buildMixer(); buildGrid();
+        buildVoices(); buildMixer(); buildGrid(); // buildVoices also rebuilds CV/IN
       }
       state.dump.tracksExpected = state.proto < 3 ? K.v2Tracks : K.tracks;
       if (m.protocol === 4) {
@@ -1402,7 +1416,7 @@ dev.onState = (reason) => {
 function resetProto() {
   const was = state.proto;
   state.proto = PROTOCOL_VERSION;
-  if (was !== PROTOCOL_VERSION) { hideBanner(); buildCvIn(); buildMixer(); buildGrid(); }
+  if (was !== PROTOCOL_VERSION) { hideBanner(); buildVoices(); buildMixer(); buildGrid(); }
 }
 
 function selectTab(name) {

@@ -24,6 +24,12 @@ volatile int32_t sink;
 // scenario 4: worst case + reverb sent from all six channels, maximum size and
 //             decay, lo-fi 64 (wobble on)
 // scenario 5: stopped, only the reverb tail ringing (one short hit, then silence)
+// scenario 6: scenario 4 + grit 31 on all four drums (0.4.3; 1..31 is the
+//             dearest setting: no sample-rate hold)
+// scenario 7: scenario 4 with the two snares in the morph zone (B = 64) and
+//             grit 31 on the two modal voices
+// scenario 8: demo song + reverb with every 0.4.3 control on: kick click 100,
+//             snare morphing (B = 64), grit 31 on drums 2-4
 static void reverb_on(Song& s, const uint8_t* sends, int size, int decay, int lofi) {
     for (int c = 0; c < kChannels; ++c) s.fx_send[c] = sends[c];
     s.master[MsRvReturn] = 100;
@@ -35,6 +41,9 @@ static void reverb_on(Song& s, const uint8_t* sends, int size, int decay, int lo
 
 extern "C" void bench_init(int scenario) {
     eng = new (eng_mem) TrackerEngine();
+    const int sc = scenario;
+    if (scenario == 6 || scenario == 7) scenario = 4;
+    if (scenario == 8) scenario = 3;
     if (scenario == 2 || scenario == 4) {
         song_clear(song_a);
         song_a.set_tempo(300);
@@ -42,6 +51,8 @@ extern "C" void bench_init(int scenario) {
             song_a.drum[v][DpEngine] = (v & 1) ? EngModal : EngSnare;
             song_a.drum[v][DpDecay] = 127;
             song_a.drum[v][DpB] = 100;
+            if (sc == 6) song_a.drum[v][DpX] = 31;
+            if (sc == 7) { if (v & 1) song_a.drum[v][DpX] = 31; else song_a.drum[v][DpB] = 64; }
         }
         for (int r = 0; r < 16; ++r) {
             for (int t = 0; t < kDrumTracks; ++t)
@@ -70,6 +81,11 @@ extern "C" void bench_init(int scenario) {
             reverb_on(song_a, demo, 84, 72, 48);
         }
         if (scenario == 5) { song_a.drum[0][DpDecay] = 0; song_a.fx_send[0] = 127; }
+        if (sc == 8) {
+            song_a.drum[0][DpX] = 100;
+            song_a.drum[1][DpB] = 64;
+            for (int v = 1; v < kDrumTracks; ++v) song_a.drum[v][DpX] = 31;
+        }
     }
     song_clear(song_b);
     eng->init(&song_a, &song_b, 0, in);

@@ -34,9 +34,11 @@ dazu ein **Browser-Editor**, der das Modul über USB steuert.
 > Slot-Regler) sind durch Host-Tests, einen
 > JS↔Firmware-Abgleich und Browser-Tests gegen ein simuliertes Modul
 > abgedeckt, **liefen aber noch nicht auf Hardware**. Das gilt auch für
-> **0.4.0–0.4.2** (Optimierungen im Audio-Kern + Lo-Fi-Reverb, Send pro Step,
-> Live-Mutes): Host-Tests, Drum-Sounds Sample für Sample gegen 0.3.2 verglichen
-> (0.4.2: ohne Mute bitgenau wie 0.4.1), CPU im Emulator gemessen; noch nicht
+> **0.4.0–0.4.3** (Optimierungen im Audio-Kern + Lo-Fi-Reverb, Send pro Step,
+> Live-Mutes; 0.4.3: Kick-Klick, Snare→Clap-Morph, Grit): Host-Tests,
+> Drum-Sounds Sample für Sample gegen 0.3.2 verglichen (0.4.2: ohne Mute
+> bitgenau wie 0.4.1; 0.4.3: mit Click/Grit auf 0 bitgenau wie 0.4.2, außer
+> Snare-B 45–83, dem neuen Morph-Bereich), CPU im Emulator gemessen; noch nicht
 > auf einem Modul.
 > Siehe [Bekannte Risiken](#bekannte-risiken).
 
@@ -79,7 +81,7 @@ exportieren/importieren.
 | Links | Song-Arrangement (Pattern × Wiederholungen, ▶ startet bzw. springt zu einem Eintrag), Pattern-Auswahl & -Länge, Kopieren/Einfügen/Löschen, **Effekt-Legende** für die Spur unter dem Cursor |
 | Mitte | das Tracker-Raster; darunter eine **Statuszeile**, die das Feld unter Maus oder Cursor erklärt |
 | Links unten | **Computer · Live**: die Regler Main/X/Y und die Z-Stellung des Moduls in Echtzeit |
-| Rechts, Tab **Drum voices** | vier Module im Eurorack-Stil: Engine, Zuordnungs-Tasten **MAIN** / **X**, Drehregler Decay, A, B, Tune, Vel; die rote LED leuchtet bei jedem Schlag. Jedes Modul trägt eine Frontplatte passend zur Engine (0.4.2, siehe unten) |
+| Rechts, Tab **Drum voices** | vier Module im Eurorack-Stil: Engine, Zuordnungs-Tasten **MAIN** / **X**, Drehregler Decay, A, B, Tune, Vel und Click (Kick) / Grit (alle anderen Engines, 0.4.3); die rote LED leuchtet bei jedem Schlag. Jedes Modul trägt eine Frontplatte passend zur Engine (0.4.2, siehe unten) |
 | Rechts, Tab **Mixer** | DR1–DR4, **IN1**, **IN2** (Audio-Eingänge), **REVERB** und Master: Level, Pan, Drive, Tone, VCA-Decay (Eingänge), **Send** (zum Reverb), ein **MUTE**-Schalter auf jedem Streifen, auch REVERB und MASTER (0.4.2), Pegel (Spitzenwert mit ≈10 ms Anstieg, ≈300 ms Abfall und 1 s Peak-Hold-Marke), Master-Filter. REVERB: Return, Size, Decay, Tone, Lo-fi, Return-Pegel und eine LED, solange die Fahne ausklingt |
 | Rechts, Tab **CV / IN** | **CV/GATE 1, 2**: Gate-Länge, Glide, Transponierung, MAIN/X-Zuordnung · **CV RANGE**: Skala Note ↔ Spannung (C0 = 0 V … C5 = 5 V) · **IN 1, 2 VCA**: Quelle (OPEN / CV GATE / IN TRACK), Decay, Hold, Drive, MAIN/X-Zuordnung, TEST |
 
@@ -265,12 +267,51 @@ FPU), Hüllkurven und Koeffizienten mit Control-Rate (alle 8 Samples).
 
 | Engine | Algorithmus | A | B |
 | --- | --- | --- | --- |
-| **Kick** | Sinus mit exponentiellem Pitch-Sweep (bis ~8× Startton) und Soft-Clip-Drive | Sweep-Tiefe | Drive |
+| **Kick** | Sinus mit exponentiellem Pitch-Sweep (bis ~8× Startton) und Soft-Clip-Drive; optionaler Schlägel-**Klick** | Sweep-Tiefe | Drive |
 | **Pluck** | Karplus-Strong-Saite: Rauschimpuls in eine Delay-Leitung mit Bruchteil-Verzögerung und Dämpfungsfilter; Verlust tonhöhenabhängig, damit die Abklingzeit überall ähnlich ist | Helligkeit des Anschlags | Dämpfung / Stretch |
 | **Noise** | weißes Rauschen durch einen resonanten State-Variable-Bandpass auf der Notenfrequenz, mit Hüllkurven-Sweep und Lautheitsausgleich | Resonanz (von Rauschen bis Pfeifen) | Sweep |
 | **Metal** | 2-Operator-FM mit unharmonischen Verhältnissen und eigener Index-Hüllkurve (Glocken, Cowbells, metallische Hats) | Verhältnis | FM-Index |
 | **Modal** | kurzer gefilterter Rauschanschlag in **drei gestimmte Resonatoren** mit Verhältnissen aus 8 Materialien: Membran, Marimba, Glockenspiel, Glocke, Röhre, Platte, Glas, Gong | Material | Anschlaghärte |
-| **Snare** | Sinus-Körper mit Pitch-Drop + Bandpass-Rauschen; B ≥ 64 macht daraus einen **Clap** (drei Rauschstöße) | Rauschanteil | Snap / Clap |
+| **Snare** | Sinus-Körper mit Pitch-Drop + Bandpass-Rauschen; B **morpht** von Snare zu **Clap** (drei Rauschstöße) | Rauschanteil | Snare → Clap |
+
+**Vel** (Velocity-Empfindlichkeit) bestimmt, wie stark die VEL-Spalte eines
+Steps die Lautstärke dieser Stimme ändert: `Pegel = 127 − (127 − VEL) × Vel / 128`.
+Bei 0 spielt jeder Schlag voll und VEL wird für die Lautstärke ignoriert, bei
+127 bestimmt VEL den Pegel ganz. Standard ist 100 (angezeigt als 79 %). Der
+Regler hat also eine echte Funktion pro Stimme (Akzente auf den Hats, eine
+Kick, die immer voll kommt) und bleibt; 0.4.3 gibt ihm nur einen klareren
+Tooltip und eine %-Anzeige.
+
+### Klick, Snare→Clap-Morph und Grit (0.4.3)
+
+Jedes Modul hat einen dritten kleinen Regler in der unteren Reihe (Byte 6 der
+Drum-Parameter, bis 0.4.2 reserviert; 0 = aus = genau der alte Klang):
+
+* **Kick: Click.** Ein ≈1,5 ms kurzer Schlägel-Klick auf der Kick:
+  hochpassgefiltertes Rauschen plus ein kurzer 1,6-kHz-Blip, mit der
+  Step-Velocity skaliert und durch den Drive der Kick. Mit Click 0 ist die Kick
+  bitgenau wie in 0.4.2. Anhören: [docs/audio/kick_click.wav](docs/audio/kick_click.wav)
+  (Click 0, 30, 60, 90, 127, je zwei Schläge).
+* **Snare: Snare → Clap-Morph auf B.** Bis 0.4.2 sprang B bei 64 (12 Uhr) von
+  Snare auf Clap. Jetzt ist B ≤ 44 die Snare und B ≥ 84 der Clap, beide genau
+  wie vorher berechnet (bitgenau). Dazwischen wird stufenlos überblendet: die
+  Rauschfarbe gleitet vom Band der Snare zu dem des Claps, der Rauschabgriff
+  wandert auf einer weichen Kurve vom Hochpass- zum Bandpass-Ausgang, und die
+  zwei zusätzlichen Clap-Stöße werden eingeblendet, während ihr Abstand wächst.
+  Ein Test misst den Sprung von einem B-Wert zum nächsten: höchstens 5 % der
+  gesamten Änderung. Anhören: [docs/audio/snare_clap_morph.wav](docs/audio/snare_clap_morph.wav)
+  (B 30 → 100 in 5er-Schritten).
+* **Pluck, Noise, Metal, Modal, Snare: Grit.** Ein Lo-Fi-Fuzz am Ausgang der
+  Stimme: Drive ×1…×16 in ein hartes Clipping, dann weniger Bits (16 → 6 ganz
+  rechts) und ab 25 % eine niedrigere Abtastrate (Sample-and-Hold, bis 12 kHz).
+  Er wirkt nur auf den Ausgang, Saiten und Resonatoren verhalten sich wie
+  vorher. Grit macht eine Stimme lauter (wie ein Fuzz-Pedal, bis ≈ +10 dB RMS);
+  dann den Level im Mixer zurücknehmen. Anhören:
+  [docs/audio/grit_demo.wav](docs/audio/grit_demo.wav) (Metal, Pluck, Modal,
+  je mit Grit 0, 32, 64, 96, 127).
+
+Songs aus 0.4.2 und älter laden mit Click/Grit auf 0. Der neue Regler braucht
+Firmware 0.4.3 (Protokoll 8); mit älterer Firmware ist er ausgegraut.
 
 ## Panel und Buchsen
 
@@ -341,6 +382,15 @@ mit g++ und `node --test`).
   Audio-Kern (ein Ratchet-/Gate-Ereignis pro Sample, Mixer-/VCA-Updates in
   vollen Samples verschoben). Die Langzeitstabilität bei 192 MHz / 1,15 V
   braucht noch mehr Praxis.
+* **0.4.3** ist nicht auf Hardware getestet: Klick, Morph und Grit wurden nur
+  auf dem Host gerendert. Die CPU-Last wurde im Emulator gemessen: normale
+  Songs (selbst mit Klick, Morph und Grit auf drei Stimmen plus Reverb) bleiben
+  bei ≈ 56 % Spitze, aber der synthetische Extremfall (jede Stimme auf jeder
+  Zeile neu angeschlagen, Reverb an, **Grit auf allen vier Stimmen**) erreicht
+  in den Spitzen ≈ 105 % des Engine-Budgets (≈ 1 % der Samples liegen
+  darüber), kann also knacken.
+  Ohne Grit liegt der Extremfall bei 99,5 % (0.4.2: 98,6 %). Bei Knistern Grit
+  auf weniger Stimmen verwenden.
 * **0.4.2** ist nicht auf Hardware getestet: die REVERB-/MASTER-Mutes und ihre
   Blenden an echten Ausgängen; die neuen Frontplatten sind nur in Headless
   Chrome geprüft (1366×768 und 1920×1080, ohne Scrollen), nicht in anderen

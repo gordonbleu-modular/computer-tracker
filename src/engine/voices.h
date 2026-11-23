@@ -19,6 +19,40 @@ struct TriggerArgs {
     uint8_t decay;   // 0..127
     uint8_t a;       // 0..127
     uint8_t b;       // 0..127
+    uint8_t x = 0;   // (0.4.3) Kick: click level, other engines: grit. 0 = off (as before)
+};
+
+// (0.4.3) Snare/clap morph zone of param B: below kMorphLo the snare and from
+// kMorphHi on the clap are computed exactly as in 0.4.2; in between the two
+// are blended (noise filter, noise tap, burst level and spacing).
+constexpr int kMorphLo = 44, kMorphHi = 84;
+// (0.4.3) Internal engine code: a Kick whose beater click is still sounding.
+// It falls back to EngKick once the click is over, so the plain kick path is
+// exactly the 0.4.2 code.
+constexpr uint8_t kEngKickClick = 6;
+
+// (0.4.3) Grit (Pluck, Noise, Metal, Modal, Snare; the engine applies it after
+// the voice, see GritState): drive x1..x16 into a hard clip (fuzz), then round
+// to 3..10 dropped low bits (12-bit DAC drops 4 anyway) and hold each value
+// for 1..4 samples (48..12 kHz). 0 = off.
+inline int32_t grit_gain(int g) { return 16 + ((g * 121) >> 6); }   // Q4
+inline int grit_drop(int g) { return (g >> 4) + 3; }
+inline int32_t grit_half(int g) { return 1 << (grit_drop(g) - 1); }
+struct GritState {
+    int32_t q = 16, mask = -1, half = 0, lim = 32767, hold = 0;
+    int n = 1, cnt = 0;
+    void set(int g) {
+        q = grit_gain(g);
+        mask = ~((1 << grit_drop(g)) - 1);
+        half = grit_half(g);
+        lim = 32767 - half;
+        n = 1 + (g >> 5);
+    }
+    int32_t process(int32_t y) {
+        if (++cnt < n) return hold;
+        cnt = 0;
+        return hold = (sat((y * q) >> 4, lim) + half) & mask;
+    }
 };
 
 // Inharmonic FM ratios (Q8) for the Metal engine.
@@ -88,6 +122,9 @@ public:
         decay_ = t.decay;
         a_ = t.a;
         b_ = t.b;
+        // (0.4.3) grit: drive into the clipper, bit and rate crush. 0 = off.
+        grit_ = engine_ == EngKick ? 0 : t.x;
+        if (grit_) { gq_ = grit_gain(grit_); ghalf_ = grit_half(grit_); }   // for the end detection
         aenv_.start(1u << 24, T.decay_coef[decay_]);
         life_ = (T.decay_samples[decay_] >> 3) + (T.decay_samples[decay_] >> 4) + 64;
         if (!active_) hold_ = 0;   // (from silence: hold 0 until the first sample)
@@ -106,6 +143,11 @@ public:
             inc_base_ = T.note_inc[note];
             ph1_ = 0;
             menv_.start(1u << 24, T.decay_coef[clampi(decay_ / 3 + 12, 0, 127)]);
+            // (0.4.3) beater click: level x, scaled with the velocity
+            click_ = t.x ? (t.x * 258 * vel_amp_) >> 15 : 0;
+            click_lp_ = 0;
+            click_ph_ = 0;
+            if (click_) engine_ = kEngKickClick;
             break;
         case EngPluck: {
             const uint32_t p = T.ks_period[note];
@@ -151,14 +193,27 @@ public:
             inc_base_ = T.note_inc[note];
             ph1_ = 0;
             menv_.start(1u << 24, T.decay_coef[clampi(decay_ / 3 + 4, 0, 127)]);
-            if (b_ >= 64) {   // clap: 3 extra bursts, 4..14 ms apart, band-pass ~1.2 kHz
+            mix_ = 0;
+            nmix_ = b_ >= 64 ? 256 : 0;   // noise tap as 0.4.2: b >= 64 band-pass, else high-pass
+            if (b_ >= kMorphHi) {   // clap: 3 extra bursts, 9..14 ms apart, band-pass ~1.2 kHz
                 burst_left_ = 3;
                 burst_gap_ = 192 + (b_ - 64) * 8;
                 burst_timer_ = burst_gap_;
                 f_base_ = 5000;
-            } else {          // snare: noise colour from dark to bright
+            } else if (b_ <= kMorphLo) {   // snare: noise colour from dark to bright
                 burst_left_ = 0;
                 f_base_ = 6000 + b_ * 330;
+            } else {          // (0.4.3) morph: t = 0 (snare) .. 1 (clap)
+                mix_ = (b_ - kMorphLo) * 819;                // Q15, 40 steps
+                // Q8 blend high-pass -> band-pass, 1 - (1 - t)^3: the high-pass
+                // noise dominates the brightness, so it is faded out early
+                const int u = kMorphHi - b_;                  // 39 .. 1
+                nmix_ = static_cast<uint16_t>(256 - u * u * u * 4 / 1000);
+                burst_left_ = 3;
+                burst_gap_ = 96 + (b_ - kMorphLo) * 32 / 5;  // 2 .. 7.3 ms, meets the clap at kMorphHi
+                burst_timer_ = burst_gap_;
+                const int32_t fs = 6000 + (b_ < 63 ? b_ : 63) * 330;   // snare colour, at most its 0.4.2 top
+                f_base_ = fs + (((5000 - fs) * mix_) >> 15);
             }
             low_ = band_ = 0;
             break;
@@ -205,8 +260,21 @@ public:
 #endif
         return hold_ = render_sound();
     }
+    uint8_t grit() const { return grit_; }
 
 private:
+    // (0.4.3) Kick beater click: high-passed noise + a 1.6 kHz blip, ~1.5 ms.
+    __attribute__((noinline)) int32_t kick_click() {
+        const int32_t n = click_rng_.noise();
+        click_lp_ += (n - click_lp_) >> 2;
+        const int32_t s = sine_lookup(click_ph_);
+        click_ph_ += 143165577u;                          // 1.6 kHz at 48 kHz
+        const int32_t out = ((((n - click_lp_) >> 1) + (s >> 1)) * click_) >> 15;
+        click_ -= (click_ >> 6) + 1;
+        if (click_ < 0) click_ = 0;
+        return out;
+    }
+
     int32_t render_sound() {
         if (ctl_ == 0) control();
         ctl_ = (ctl_ + 1) & (kControlRate - 1);
@@ -217,6 +285,14 @@ private:
             y = sine_lookup(ph1_);
             ph1_ += inc_cur_;
             y = (y * amp_) >> 15;
+            if (b_) y = softclip((y * (16 + b_)) >> 4);
+            return y;
+        }
+        case kEngKickClick: {   // (0.4.3) kick + beater click (only while the click sounds)
+            y = sine_lookup(ph1_);
+            ph1_ += inc_cur_;
+            y = (y * amp_) >> 15;
+            y = clamp16(y + kick_click());
             if (b_) y = softclip((y * (16 + b_)) >> 4);
             return y;
         }
@@ -284,7 +360,9 @@ private:
             low_ = sat(low_ + ((f_base_ * band_) >> 15), 65535);
             const int32_t high = sat(in - low_ - band_, 65535);
             band_ = sat(band_ + ((f_base_ * high) >> 15), 65535);
-            const int32_t nz = burst_left_ || b_ >= 64 ? band_ : high;
+            // noise tap, fixed per hit (0.4.3: branch-free): nmix 0 = high-pass
+            // (snare), 256 = band-pass (clap), exact; in between the morph blend
+            const int32_t nz = high + (((band_ - high) * nmix_) >> 8);
             y = (body * (127 - a_) + clamp16(nz) * (a_ + 16)) >> 7;
             return (clamp16(y) * amp_) >> 15;
         }
@@ -307,8 +385,11 @@ private:
 
     // True once the voice can no longer reach 1/4 LSB at the outputs.
     bool below_end(int32_t target) {
-        const int32_t thr = end_thr_ ? *end_thr_ : 0;
+        int32_t thr = end_thr_ ? *end_thr_ : 0;
         if (thr <= 0) return false;
+        // (0.4.3) grit: the output is (y * gq / 16) rounded to the crushed
+        // step, so y below max(thr, half step) * 16 / gq can no longer be heard.
+        if (__builtin_expect(grit_ != 0, 0)) thr = ((thr > ghalf_ ? thr : ghalf_) << 4) / gq_;
         switch (engine_) {
         case EngPluck:
         case EngModal:
@@ -324,6 +405,8 @@ private:
             const int32_t a = amp_ > target ? amp_ : target;
             return (b_ ? (a * (16 + b_)) >> 4 : a) < thr;
         }
+        case kEngKickClick:
+            return false;   // (0.4.3) let the click finish
         case EngSnare:
             if (burst_left_) return false;   // clap bursts restart the envelope
             [[fallthrough]];
@@ -349,6 +432,9 @@ private:
         }
         --life_;
         switch (engine_) {
+        case kEngKickClick:
+            if (click_ == 0) engine_ = EngKick;   // (0.4.3) click over: plain kick path again
+            [[fallthrough]];
         case EngKick: {
             menv_.tick();
             const uint32_t k = (static_cast<uint32_t>(a_) * 7u * static_cast<uint32_t>(menv_.q15())) >> 10;
@@ -383,7 +469,8 @@ private:
             if (burst_left_) {
                 burst_timer_ -= kControlRate;
                 if (burst_timer_ <= 0) {
-                    aenv_.v = 1u << 24;
+                    if (mix_ == 0) aenv_.v = 1u << 24;
+                    else if (aenv_.v < (static_cast<uint32_t>(mix_) << 9)) aenv_.v = static_cast<uint32_t>(mix_) << 9;   // (0.4.3) morph: bursts at level t
                     --burst_left_;
                     burst_timer_ = burst_gap_;
                 }
@@ -398,6 +485,8 @@ private:
     uint8_t engine_ = EngKick;
     bool active_ = false;
     uint8_t decay_ = 0, a_ = 0, b_ = 0;
+    uint8_t grit_ = 0;      // (0.4.3) in former padding: no offset of a 0.4.2 member moves
+    uint16_t nmix_ = 0;     // (0.4.3) snare noise tap, Q8 (0 high-pass, 256 band-pass)
     uint32_t ctl_ = 0;
     int32_t life_ = 0;
     int32_t vel_amp_ = 0, amp_ = 0, amp_step_ = 0;
@@ -429,6 +518,12 @@ public:
 private:   // noise steps still owed after an early end
     Rng rng_;
     int16_t ks_[kKsSize] = {};
+    // (0.4.3) click / grit / morph (at the end: the 0.4.2 members keep their offsets)
+    int32_t click_ = 0, click_lp_ = 0;
+    uint32_t click_ph_ = 0;
+    Rng click_rng_;
+    int32_t mix_ = 0;
+    int32_t gq_ = 16, ghalf_ = 0;
 public:
     void seed(uint32_t s) { rng_.s = s ? s : 1; }
 };

@@ -239,6 +239,11 @@ public:
                 }
             }
             run_mask_ = run;
+            // (0.4.3) grit on the voices that use it (one test while none does)
+            if (__builtin_expect((grit_mask_ & live_mask) != 0, 0)) {
+                for (int v = 0; v < kDrumTracks; ++v)
+                    if (grit_mask_ & live_mask & (1u << v)) ch[v] = grit_[v].process(ch[v]);
+            }
         }
         setup_mask_ = setup;
 #ifdef TRK_SOUND_CHECK
@@ -379,7 +384,12 @@ private:
         a.decay = static_cast<uint8_t>(clampi(decay, 0, 127));
         a.a = static_cast<uint8_t>(clampi(pa, 0, 127));
         a.b = static_cast<uint8_t>(pb);
+        a.x = p[DpX];   // (0.4.3) kick click / grit
         v.trigger(a);
+        if (v.grit()) {
+            if (grit_v_[e.track] != v.grit()) { grit_v_[e.track] = v.grit(); grit_[e.track].set(v.grit()); }
+            grit_mask_ |= 1u << e.track;
+        } else grit_mask_ &= ~(1u << e.track);
         mixer_.set_send_lock(e.track, e.send);   // (0.4.1) W effect, or back to the knob
         run_mask_ |= 1u << e.track;
         hit_[e.track] = 4095;
@@ -464,6 +474,9 @@ private:
     int transpose_ = 0;
     uint32_t tick_ = 0;
     uint32_t run_mask_ = 0, setup_mask_ = 0;
+    uint32_t grit_mask_ = 0;   // (0.4.3) voices whose last hit has grit on
+    GritState grit_[kDrumTracks];
+    uint8_t grit_v_[kDrumTracks] = {};
     uint16_t led_[6] = {};
     int led_next_ = 6;
     bool led_due_ = false, publish_due_ = false, panel_due_ = false;

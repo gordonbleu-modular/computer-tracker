@@ -5,7 +5,7 @@
 import puppeteer from 'puppeteer-core';
 import { readFileSync } from 'node:fs';
 const dump = [...readFileSync('build-host/ui-dump.bin')];
-const proto = +(process.env.PROTO || 7);
+const proto = +(process.env.PROTO || 8);
 const out = process.env.OUT || 'docs';
 const b = await puppeteer.launch({ executablePath: process.env.CHROME || '/usr/bin/google-chrome', headless: 'new', args: ['--no-sandbox', '--font-render-hinting=none'] });
 const results = {};
@@ -23,7 +23,7 @@ for (const [w, h] of [[1366, 768], [1920, 1080]]) {
     window.__mutes = 0;
     const out = { name: 'Workshop Tracker', state: 'connected', open: async () => {}, send(bytes) {
       const d = [...bytes]; window.__sent.push(d);
-      if (d[3] === 0x01) emit([0xF0,0x7D,0x54,0x41, proto,0,proto >= 6 ? 4 : proto >= 3 ? 3 : proto,proto >= 7 ? 2 : proto >= 6 ? 1 : proto >= 5 ? 2 : proto >= 4 ? 1 : 0, proto >= 3 ? 8 : 6,4,16,64,6,32, 0, 3, 0xF7]);
+      if (d[3] === 0x01) emit([0xF0,0x7D,0x54,0x41, proto,0,proto >= 6 ? 4 : proto >= 3 ? 3 : proto,proto >= 8 ? 3 : proto >= 7 ? 2 : proto >= 6 ? 1 : proto >= 5 ? 2 : proto >= 4 ? 1 : 0, proto >= 3 ? 8 : 6,4,16,64,6,32, 0, 3, 0xF7]);
       if (d[3] === 0x16 && d[4] >= 8 && proto >= 7) { const bit = d[4] === 8 ? 32 : 64; window.__mutes = d[5] >= 64 ? (window.__mutes | bit) : (window.__mutes & ~bit); }
       if (d[3] === 0x02) { window.__dumps = (window.__dumps || 0) + 1; }
       if (d[3] === 0x02) { let s=-1; for (let i=0;i<dump.length;i++){ if(dump[i]===0xF0) s=i; else if(dump[i]===0xF7&&s>=0){ emit(dump.slice(s,i+1)); s=-1; } } }
@@ -92,7 +92,7 @@ for (const [w, h] of [[1366, 768], [1920, 1080]]) {
       hexLeft: /[A-F]/.test([...document.querySelectorAll('#grid .f.v, #grid .f.xv')].map((x) => x.textContent).join('')),
     };
   });
-  const tag = proto >= 7 ? '' : `-proto${proto}`;
+  const tag = proto >= 8 ? '' : `-proto${proto}`;
   r.panelStyles = await p.$$eval('#voices .module.drum', (x) => x.map((e) => [...e.classList].find((c) => c.startsWith('p-')) + ':' + e.querySelector('.plate').textContent));
   r.voiceJacks = await p.$$eval('#voices .jack', (x) => x.length);
   await p.screenshot({ path: `${out}/screenshot-voices-${w}x${h}${tag}.png` });
@@ -166,6 +166,13 @@ for (const [w, h] of [[1366, 768], [1920, 1080]]) {
     const sel = await p.$$('#voices select.engine');
     for (const [i, e] of [[0, '1'], [1, '2'], [2, '0'], [3, '5']]) await sel[i].select(e);
     await new Promise((r) => setTimeout(r, 200));
+    // 0.4.3 controls: grit on the Pluck, click on the Kick, the Snare half way to the clap
+    const turn = async (mod, sel2, n) => { const k = (await p.$$(`#voices .module.drum`))[mod]; const kn = await k.$(sel2); await kn.focus(); for (let j = 0; j < n; j++) await p.keyboard.press('PageUp'); await p.evaluate(() => document.activeElement.blur()); };
+    await turn(0, '.knob.kx', 5);
+    await turn(2, '.knob.kx', 8);
+    await turn(3, '.krow:not(.three) .knob:nth-child(2)', 3);
+    await new Promise((r) => setTimeout(r, 150));
+    r.newKnobs = await p.$$eval('#voices .module.drum', (x) => x.map((m) => [...m.querySelectorAll('.knob')].map((k) => k.querySelector('.klabel').textContent + '=' + k.querySelector('.kvalue').textContent).join(' ')));
     r.panelStyles2 = await p.$$eval('#voices .module.drum', (x) => x.map((e) => [...e.classList].find((c) => c.startsWith('p-'))));
     r.voicesScroll2 = await p.evaluate(() => { const e = document.getElementById('pane-voices'); return e.scrollHeight > e.clientHeight + 1 || e.scrollWidth > e.clientWidth + 1; });
     await p.mouse.move(5, h - 5);

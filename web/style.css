@@ -435,3 +435,9 @@ dialog td { padding: 2px 10px 2px 0; } dialog td:first-child { color: var(--gold
 #voices.rack::after { bottom: -6px; }
 .p-modal .knob .kvalue .eff { color: #ff7a7a; }
 .p-metal .knob .kvalue .eff { color: #860a07; }
+/* 0.4.3: Tune, Vel and Click/Grit share the bottom row of a drum module */
+.module.drum .krow.three { justify-content: space-between; }
+.module.drum .krow.three .knob { min-width: 0; flex: 1 1 0; }
+.module.drum .krow.three .kface { width: min(var(--k-s), 2.9rem); height: min(var(--k-s), 2.9rem); }
+.module.drum .krow.three .klabel { letter-spacing: .02em; }
+.module.drum .knob.kx .kval-arc { stroke: #e0662b; }

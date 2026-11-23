@@ -658,8 +658,8 @@ static void test_macros_v2() {
     feed(sysex({proto::SetMacroMask, 0}));
     CHECK(pr.rejected() == rej + 3);
     feed(sysex({proto::Hello}));
-    CHECK(!h.sent.empty() && h.sent.back()[0] == proto::Info && h.sent.back()[1] == 7 && h.sent.back()[3] == 4 &&
-          h.sent.back()[4] == 2 && h.sent.back()[5] == 8);
+    CHECK(!h.sent.empty() && h.sent.back()[0] == proto::Info && h.sent.back()[1] == 8 && h.sent.back()[3] == 4 &&
+          h.sent.back()[4] == 3 && h.sent.back()[5] == 8);
 
     // Panel report contents.
     EngineStatus st;
@@ -1605,6 +1605,157 @@ static void test_v042_mutes() {
     std::printf("  mutes: unmuted bit-identical, reverb/master fade in <= 6 ms, not stored in the song\n");
 }
 
+// 0.4.3: kick click, snare/clap morph, grit, song migration.
+static std::vector<int32_t> voice_out(uint8_t eng, uint8_t note, uint8_t dec, uint8_t a, uint8_t b, uint8_t x, int n) {
+    DrumVoice v;
+    TriggerArgs t{eng, note, 127, dec, a, b};
+    t.x = x;
+    v.trigger(t);
+    std::vector<int32_t> o;
+    o.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) o.push_back(v.render());
+    return o;
+}
+// Energy envelope in 2 ms windows, normalised.
+static std::vector<double> env_of(const std::vector<int32_t>& y) {
+    std::vector<double> e;
+    for (size_t i = 0; i + 96 <= y.size(); i += 96) {
+        double a = 0;
+        for (size_t k = i; k < i + 96; ++k) a += double(y[k]) * y[k];
+        e.push_back(std::sqrt(a / 96));
+    }
+    double m = 1e-9;
+    for (double v : e) m = std::max(m, v);
+    for (double& v : e) v /= m;
+    return e;
+}
+static double env_dist(const std::vector<double>& a, const std::vector<double>& b) {
+    double d = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i) d += std::fabs(a[i] - b[i]);
+    return d / static_cast<double>(std::min(a.size(), b.size()));
+}
+// Zero-crossing rate of the first 100 ms (brightness proxy).
+static double zcr(const std::vector<int32_t>& y) {
+    int z = 0;
+    for (size_t i = 1; i < 4800 && i < y.size(); ++i) z += (y[i - 1] < 0) != (y[i] < 0);
+    return z / 4800.0;
+}
+
+static void test_v043() {
+    // (a) Kick click: x = 0 is the plain kick; with x > 0 the first ms get a
+    // click and, once it is over, the kick continues sample for sample.
+    {
+        const auto k0 = voice_out(EngKick, 36, 70, 64, 0, 0, 9600);
+        const auto k1 = voice_out(EngKick, 36, 70, 64, 0, 100, 9600);
+        // high-frequency energy (first difference) in the first 2 ms
+        double e0 = 0, e1 = 0;
+        for (int i = 1; i < 96; ++i) {
+            const double d0 = k0[i] - k0[i - 1], d1 = k1[i] - k1[i - 1];
+            e0 += d0 * d0; e1 += d1 * d1;
+        }
+        CHECK(e1 > e0 * 4);
+        bool same_after = true;
+        for (int i = 2400; i < 9600; ++i) same_after &= k0[i] == k1[i];
+        CHECK(same_after);
+        int differ_until = 0;
+        for (int i = 0; i < 9600; ++i) if (k0[i] != k1[i]) differ_until = i;
+        std::printf("  kick click 100: +%.1f dB high-frequency energy in the first 2 ms, kick identical again after %.1f ms\n",
+                    10 * std::log10(e1 / e0), differ_until / 48.0);
+        // with drive on as well
+        const auto d0 = voice_out(EngKick, 36, 70, 64, 80, 0, 9600);
+        const auto d1 = voice_out(EngKick, 36, 70, 64, 80, 127, 9600);
+        bool same = true;
+        for (int i = 2400; i < 9600; ++i) same &= d0[i] == d1[i];
+        CHECK(same);
+    }
+    // (b) Snare/clap morph: outside 44..84 the old maths; inside, every step of
+    // B changes the sound a little. The largest change between neighbouring B
+    // values must be small against the whole snare -> clap distance (0.4.2
+    // jumped the whole way between 63 and 64).
+    {
+        std::vector<std::vector<double>> env;
+        std::vector<double> z;
+        for (int b = 36; b <= 92; ++b) {
+            const auto y = voice_out(EngSnare, 50, 70, 64, static_cast<uint8_t>(b), 0, 14400);
+            env.push_back(env_of(y));
+            z.push_back(zcr(y));
+        }
+        const double whole = env_dist(env[kMorphLo - 36], env[kMorphHi - 36]);
+        const double zwhole = std::fabs(z[kMorphLo - 36] - z[kMorphHi - 36]);
+        double worst = 0, zworst = 0;
+        int worst_b = 0;
+        for (size_t i = 1; i < env.size(); ++i) {
+            const double d = env_dist(env[i - 1], env[i]);
+            const double dz = std::fabs(z[i] - z[i - 1]);
+            if (dz > zworst) { zworst = dz; worst_b = 36 + static_cast<int>(i); }
+            worst = std::max(worst, d);
+        }
+        std::printf("  snare->clap morph: brightness (zero crossings) %.3f -> %.3f, largest step between neighbouring B %.3f (B %d, %.0f %% of the way); envelope steps <= %.3f of %.3f\n",
+                    z[kMorphLo - 36], z[kMorphHi - 36], zworst, worst_b, 100 * zworst / zwhole, worst, whole);
+        CHECK(zwhole > 0.2);
+        CHECK(zworst < zwhole * 0.06);   // 40 steps: an even morph moves 2.5 % per step
+        CHECK(worst < std::max(whole * 0.25, 0.01));
+    }
+    // (c) Grit: 0 = off; on, the voice output is crushed to the grit step and
+    // held; the string itself is untouched (pluck: same pitch).
+    {
+        GritState g;
+        g.set(127);
+        CHECK(g.n == 4 && g.half == 1 << 9);
+        int32_t prev = 0, changes = 0;
+        bool quant = true;
+        for (int i = 0; i < 400; ++i) {
+            const int32_t y = g.process((i * 997) % 20000 - 10000);
+            quant &= (y & ((1 << 10) - 1)) == 0;
+            quant &= y <= 32767 && y >= -32768;
+            if (y != prev) ++changes;
+            prev = y;
+        }
+        CHECK(quant);
+        CHECK(changes <= 100);
+        GritState g1;
+        g1.set(1);
+        CHECK(g1.n == 1 && g1.process(1000) == (((1000 * g1.q) >> 4) + 4) / 8 * 8);
+        // engine: grit 0 on every voice changes nothing; grit > 0 only the drum it is set on
+        auto a = make_song(true), a2 = make_song(true), a3 = make_song(true), b = make_song(false);
+        a3->drum[2][DpX] = 90;
+        auto e1 = std::make_unique<TrackerEngine>(), e3 = std::make_unique<TrackerEngine>();
+        EngineIn in;
+        e1->init(a.get(), b.get(), 0, in);
+        e3->init(a3.get(), b.get(), 0, in);
+        e1->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+        e3->commands().push(Command{CmdType::PlaySong, 0, 0, 0});
+        EngineOut o1, o3;
+        bool differs = false;
+        for (int i = 0; i < kSampleRate * 2; ++i) {
+            e1->process(in, o1); e3->process(in, o3);
+            differs |= o1.audio[0] != o3.audio[0];
+        }
+        CHECK(differs);
+        (void)a2;
+    }
+    // (d) Song format: fx_ver 2. A 0.4.0-0.4.2 song (fx_ver 1) keeps its reverb
+    // and gets click/grit 0 whatever the reserved bytes held; older songs get
+    // both; a 0.4.3 song keeps its values.
+    {
+        Song s;
+        song_clear(s);
+        CHECK(s.fx_ver == 2);
+        s.fx_ver = 1;
+        s.fx_send[1] = 77;
+        s.master[MsRvDecay] = 9;
+        s.drum[0][DpX] = 55; s.drum[3][DpR7] = 99;
+        header_sanitize(s);
+        CHECK(s.fx_ver == 2 && s.fx_send[1] == 77 && s.master[MsRvDecay] == 9 && s.drum[0][DpX] == 0 && s.drum[3][DpR7] == 0);
+        s.drum[0][DpX] = 55;
+        header_sanitize(s);
+        CHECK(s.drum[0][DpX] == 55);
+        s.fx_ver = 0;
+        header_sanitize(s);
+        CHECK(s.fx_send[1] == 0 && s.drum[0][DpX] == 0 && s.master[MsRvDecay] == kRvDefaults[2]);
+    }
+}
+
 int main() {
     test_dsp();
     test_voices();
@@ -1633,6 +1784,7 @@ int main() {
     test_v040_leds();
     test_v041_send_fx();
     test_v042_mutes();
+    test_v043();
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -30,11 +30,13 @@ USB.
 > in the audio core; 0.3.1 removed 0.3.0's second effect column again; 0.3.2:
 > positive-only CV with C0 = 0 V, no CV velocity, the new slot knob) are
 > covered by host tests, a JS↔firmware cross-check and headless-browser tests against a simulated
-> module, but **have not run on hardware yet**. The same goes for **0.4.0–0.4.2**
-> (audio-core optimisations + lo-fi reverb, per-step send, live mutes):
+> module, but **have not run on hardware yet**. The same goes for **0.4.0–0.4.3**
+> (audio-core optimisations + lo-fi reverb, per-step send, live mutes; 0.4.3:
+> kick click, snare→clap morph, grit):
 > host-tested, drum sounds checked sample by sample against 0.3.2 (0.4.2:
-> bit-identical to 0.4.1 when nothing is muted), CPU measured in the emulator;
-> not yet on a module. See [Known risks](#known-risks).
+> bit-identical to 0.4.1 when nothing is muted; 0.4.3: bit-identical to 0.4.2
+> with click/grit at 0, except snare B 45–83, which is now the morph zone),
+> CPU measured in the emulator; not yet on a module. See [Known risks](#known-risks).
 
 ![Editor at 1366×768: tracker grid with the keyboard sketch below it](docs/screenshot-grid-keyboard-1366x768.png)
 
@@ -73,7 +75,7 @@ browser and can be exported/imported as `.wtrk.json`.
 | Toolbar | song name, **SLOT n** (the slot the module plays, `· edited` when the editor has unsaved changes), flash slot load/save, read from / send to module, new, demo, export/import, octave, **step jump** (rows the cursor moves after an entry), edit mode, follow, **⌨** keyboard sketch on/off, Keys (help) |
 | Left | song arrangement (pattern × repeats, ▶ to start or cue an entry), pattern selector & length, copy/paste/clear, **effect legend** for the track under the cursor, **Computer · Live** panel (the module's Main/X/Y knobs and Z page) |
 | Centre | the tracker grid; under it the **keyboard sketch** (which computer key plays which note, see below); at the bottom a **status line** that explains the field under the mouse or cursor |
-| Right, tab **Drum voices** | four Eurorack-style modules: engine, routing buttons **MAIN** / **X**, knobs Decay, A, B, Tune, Vel; the red LED lights on every hit. Each module wears a faceplate that matches its engine (0.4.2, see below) |
+| Right, tab **Drum voices** | four Eurorack-style modules: engine, routing buttons **MAIN** / **X**, knobs Decay, A, B, Tune, Vel and Click (Kick) / Grit (all other engines, 0.4.3); the red LED lights on every hit. Each module wears a faceplate that matches its engine (0.4.2, see below) |
 | Right, tab **Mixer** | DR1–DR4, **IN1**, **IN2** (audio inputs), **REVERB** and Master: level, pan, drive, tone, VCA decay (inputs), **send** (to the reverb), a **MUTE** switch on every strip including REVERB and MASTER (0.4.2), meters (peak, with ≈10 ms attack, ≈300 ms release and a 1 s peak-hold mark), master filter. REVERB: return, size, decay, tone, lo-fi, a return meter and a LED while the tail rings |
 | Right, tab **CV / IN** | **CV/GATE 1, 2**: gate length, glide, transpose, MAIN/X routing · **CV RANGE**: scale of the note ↔ voltage mapping (C0 = 0 V … C5 = 5 V) · **IN 1, 2 VCA**: source (OPEN / CV GATE / IN TRACK), decay, hold, drive, MAIN/X routing, TEST |
 
@@ -250,15 +252,53 @@ with envelopes and coefficients at control rate (every 8 samples).
 
 | Engine | Algorithm | A | B |
 | --- | --- | --- | --- |
-| **Kick** | sine oscillator with exponential pitch sweep (up to ~8× start pitch) and soft-clip drive | sweep depth | drive |
+| **Kick** | sine oscillator with exponential pitch sweep (up to ~8× start pitch) and soft-clip drive; optional beater **click** | sweep depth | drive |
 | **Pluck** | Karplus-Strong string: noise-burst excitation into a fractional-delay line with a damping filter; loss scaled by pitch so decay is even across the keyboard | brightness of the excitation | damping / stretch |
 | **Noise** | white noise through a resonant Chamberlin state-variable band-pass tuned to the note, with an envelope-driven sweep and loudness compensation | resonance (from hiss to whistling) | sweep amount |
 | **Metal** | 2-operator FM with a table of inharmonic ratios and its own index envelope (bells, cowbells, metallic hats) | ratio | FM index |
 | **Modal** | short filtered noise strike into **three tuned resonators** (SVF band-passes) with ratios from 8 materials: membrane, marimba, glock, bell, tube, plate, glass, gong | material | strike hardness |
-| **Snare** | sine body with pitch drop + band-passed noise; B ≥ 64 turns it into a **clap** (three noise bursts) | noise mix | snap / clap |
+| **Snare** | sine body with pitch drop + band-passed noise; B **morphs** from snare to **clap** (three noise bursts) | noise mix | snare → clap |
 
-*Tune* (±48 semitones) and the note column set the pitch; *Vel sens* sets
-how much velocity changes loudness. Fx `A`, `B`, `D` lock A/B/decay per hit.
+*Tune* (±48 semitones) and the note column set the pitch. Fx `A`, `B`, `D`
+lock A/B/decay per hit.
+
+**Vel** (velocity sensitivity) decides how much the VEL column of a step
+changes this voice's loudness: `level = 127 − (127 − VEL) × Vel / 128`.
+At 0 every hit plays at full level and the VEL column is ignored for loudness;
+at 127 the VEL column sets the level fully. The default is 100 (shown as 79 %).
+It is a real per-voice setting (accents on the hats, a kick that always hits
+full), so it stays; 0.4.3 only gives it a clearer tooltip and a % readout.
+
+### Click, snare→clap morph and grit (0.4.3)
+
+Every module has a third small knob in its bottom row (byte 6 of the drum
+parameters, reserved until 0.4.2; 0 = off = exactly the old sound):
+
+* **Kick: Click.** A ≈1.5 ms beater click on top of the kick: high-passed noise
+  plus a short 1.6 kHz blip, scaled by the step velocity and fed through the
+  kick's drive. With Click at 0 the kick is bit-identical to 0.4.2. Listen:
+  [docs/audio/kick_click.wav](docs/audio/kick_click.wav) (click 0, 30, 60, 90,
+  127, two hits each).
+* **Snare: snare → clap morph on B.** Until 0.4.2, B jumped from snare to clap
+  at 64 (12 o'clock). Now B ≤ 44 is the snare and B ≥ 84 the clap, both
+  computed exactly as before (bit-identical). In between, the two are blended
+  continuously: the noise colour slides from the snare's band to the clap's,
+  the noise tap moves from the high-pass to the band-pass output along a
+  smooth curve, and the clap's two extra bursts fade in while their spacing
+  grows. A test measures the step from one B value to the next: at most 5 %
+  of the full change. Listen:
+  [docs/audio/snare_clap_morph.wav](docs/audio/snare_clap_morph.wav) (B 30 → 100
+  in steps of 5).
+* **Pluck, Noise, Metal, Modal, Snare: Grit.** A lo-fi fuzz on the voice output:
+  drive ×1…×16 into a hard clip, then fewer bits (16 → 6 at the top) and,
+  from 25 % up, a lower sample rate (sample-and-hold, down to 12 kHz). It works
+  on the output only, so strings and resonators behave as before. Grit makes a
+  voice louder (like a fuzz pedal, up to ≈ +10 dB RMS); turn its mixer level
+  down. Listen: [docs/audio/grit_demo.wav](docs/audio/grit_demo.wav) (Metal,
+  Pluck, Modal, each with grit 0, 32, 64, 96, 127).
+
+Songs from 0.4.2 and older load with Click/Grit at 0. The new knob needs
+firmware 0.4.3 (protocol 8); with older firmware it is greyed out.
 
 ## Panel and jacks
 
@@ -377,6 +417,13 @@ Implemented: everything listed at the top. Not implemented / limitations:
   slot-select fix on the panel, and the audio-core timing changes (one
   ratchet/gate event per sample, mixer/VCA updates postponed on busy samples).
   Long-term stability at 192 MHz / 1.15 V still needs more hardware time.
+* **0.4.3** is untested on hardware: the click, the morph and grit were only
+  rendered on the host. The CPU cost was measured in the emulator: normal
+  songs (even with click, morph and grit on three voices plus reverb) stay at
+  ≈ 56 % peak, but the synthetic worst case (every voice retriggered on every
+  row, reverb on, **grit on all four voices**) reaches ≈ 105 % of the engine
+  budget at its peaks (≈ 1 % of the samples are over), i.e. it can crackle. With grit off, the worst case
+  is 99.5 % (0.4.2: 98.6 %). If you hear crackles, use grit on fewer voices.
 * **0.4.2** is untested on hardware: the REVERB/MASTER mutes and their
   fades on real outputs, and the new faceplates were only checked in
   headless Chrome (1366×768 and 1920×1080, no scrolling) and not in other

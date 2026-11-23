@@ -193,7 +193,7 @@ test('status decode', () => {
 test('v6: reverb fields, defaults and migration of older songs', async () => {
   const { RV, RV_DEFAULTS, OFF, msg, Song } = await import('../js/protocol.js');
   const s = new Song();
-  assert.equal(s.fxVer, 1);
+  assert.equal(s.fxVer, 2);
   RV_DEFAULTS.forEach((v, i) => assert.equal(s.master(RV.return + i), v));
   for (let c = 0; c < 6; c++) assert.equal(s.send(c), 0); // new songs start dry
   s.setSend(2, 200);
@@ -205,7 +205,7 @@ test('v6: reverb fields, defaults and migration of older songs', async () => {
   const old = Song.fromJSON(j);
   assert.equal(old.send(2), 0);
   assert.equal(old.master(RV.decay), RV_DEFAULTS[2]);
-  assert.equal(old.fxVer, 1);
+  assert.equal(old.fxVer, 2);
   // A 0.4.0 file keeps its values.
   const keep = Song.fromJSON(s.toJSON());
   assert.equal(keep.send(2), 127);
@@ -275,7 +275,7 @@ test('songs from <= 0.3.1 (C2 = 0 V) keep their CV voltages', () => {
 
 test('v7: live mutes (SetMaster 8/9, Status flags 32/64), not stored in the song', async () => {
   const { MASTER_MUTE, PROTOCOL_VERSION } = await import('../js/protocol.js');
-  assert.equal(PROTOCOL_VERSION, 7);
+  assert.ok(PROTOCOL_VERSION >= 7);
   assert.deepEqual(MASTER_MUTE, { reverb: 8, master: 9 });
   assert.deepEqual([...msg.setLiveMute('reverb', true)], [...frame(CMD.SetMaster, [8, 127])]);
   assert.deepEqual([...msg.setLiveMute('master', false)], [...frame(CMD.SetMaster, [9, 0])]);
@@ -291,4 +291,30 @@ test('v7: live mutes (SetMaster 8/9, Status flags 32/64), not stored in the song
   pl[6] = 0;
   const s3 = decode(frame(CMD.Status, pl)); // older firmware never sets these bits
   assert.equal(s3.reverbMuted || s3.masterMuted, false);
+});
+
+test('v8: click/grit param, fx_ver 2 migration, header for older firmware', async () => {
+  const { OFF, Song, DRUM_X, ENGINES, PROTOCOL_VERSION, FX_VERSION } = await import('../js/protocol.js');
+  assert.equal(PROTOCOL_VERSION, 8);
+  assert.equal(FX_VERSION, 2);
+  assert.equal(DRUM_X, 6);
+  assert.deepEqual(ENGINES.map((e) => e.x), ['Click', 'Grit', 'Grit', 'Grit', 'Grit', 'Grit']);
+  const s = demoSong();
+  for (let v = 0; v < 4; v++) assert.equal(s.drum(v, DRUM_X), 0); // neutral by default
+  // a 0.4.0-0.4.2 song (fx_ver 1) keeps its reverb, junk in bytes 6/7 is cleared
+  s.header[OFF.fxVer] = 1;
+  s.setSend(1, 90);
+  s.header[OFF.drum + 6] = 77; s.header[OFF.drum + 3 * 8 + 7] = 5;
+  assert.equal(s.migrateFx(), true);
+  assert.equal(s.send(1), 90);
+  assert.equal(s.drum(0, DRUM_X), 0);
+  assert.equal(s.header[OFF.drum + 3 * 8 + 7], 0);
+  assert.equal(s.fxVer, 2);
+  // firmware 0.4.0-0.4.2 gets fx_ver 1, 0.4.3 gets 2
+  s.setDrum(2, DRUM_X, 50);
+  const h7 = msg.setHeader(s, 7), h8 = msg.setHeader(s, 8); // payload from byte 4
+  assert.equal(h7[4 + OFF.fxVer], 1);
+  assert.equal(h8[4 + OFF.fxVer], 2);
+  assert.equal(h8[4 + OFF.drum + 2 * 8 + DRUM_X], 50);
+  assert.equal(uploadMessages(s, 7)[0][4 + OFF.fxVer], 1);
 });

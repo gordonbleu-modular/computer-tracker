@@ -122,7 +122,10 @@ def run(scenario, n):
 def main():
     names = {0: "idle (stopped)", 1: "demo song playing", 2: "worst case (4 voices, ratchets every row, all mixer FX)",
              3: "demo song + reverb", 4: "worst case + reverb from all 6 channels (max size/decay, wobble)",
-             5: "stopped, reverb tail ringing"}
+             5: "stopped, reverb tail ringing",
+             6: "worst case + reverb + grit 31 on all 4 drums",
+             7: "worst case + reverb, snares morphing (B=64), grit on modals",
+             8: "demo song + reverb, click + morph + grit on all drums"}
     budget = 192e6 / 48000
     print(f"samples per scenario: {N}, budget at 192 MHz: {budget:.0f} cycles/sample")
     scs = [int(a) for a in os.environ.get("SCENARIOS", "0,1,2,3,4,5").split(",")]
@@ -141,7 +144,7 @@ def main():
                 funcs.append((int(p[0], 16), int(p[1], 16), p[3]))
         funcs.sort()
         starts = [f[0] for f in funcs]
-        for sc in (0, 2):
+        for sc in [int(a) for a in os.environ.get("PROFILE", "0,2").split(",")]:
             call("bench_init", sc)
             call("bench_run", 4800)
             state["prof"] = collections.Counter()

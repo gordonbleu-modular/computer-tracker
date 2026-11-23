@@ -1,4 +1,4 @@
-# Workshop Tracker USB protocol (v7)
+# Workshop Tracker USB protocol (v8)
 
 The card appears as a **USB-MIDI device** called **"Workshop Tracker"**
 (VID `0x2E8A`, PID `0x10C1`). All editor traffic is **SysEx**; no notes or CCs
@@ -77,10 +77,17 @@ values are the plain numbers.
 | 17 | 2 | macro_excl[2] (v2): PERFORM macro routing, [0] = decay macro (Main knob), [1] = colour macro (X knob). **Bit v set = drum voice v is *not* affected.** Stored inverted so that 0 (old songs, v1 flash slots) means "all voices". |
 | 19 | 2 | macro_cvin[2] (v3): routing of Main [0] / X [1] to the CV and IN modules, **bit set = routed**: bit 0/1 = CV1/CV2 (Main: gate length, X: glide), bit 2/3 = IN1/IN2 (Main: VCA decay, X: drive). New songs: 0x0F. Songs migrated from v2: 0. |
 | 21 | 6 | fx_send[6] (v6): reverb send of DR1–4, IN1, IN2, 0–127 (square law: 64 ≈ −12 dB, 127 = 0 dB, post level/mute) |
-| 27 | 1 | fx_ver (v6): 1 = the reverb fields are valid. Anything else (an older song: these bytes were reserved = 0) is migrated on load/receive: all sends 0, reverb parameters to their defaults, fx_ver = 1, so an old song sounds exactly as before. |
+| 27 | 1 | fx_ver (v6, 2 since v8): 2 = the reverb fields and drum bytes 6/7 are valid. 1 (a 0.4.0–0.4.2 song) keeps its reverb fields, drum bytes 6 and 7 are set to 0. Anything else (an older song: these bytes were reserved = 0) is migrated on load/receive: all sends 0, reverb parameters to their defaults, drum bytes 6/7 = 0. Afterwards fx_ver = 2, so an old song sounds exactly as before. |
 | 28 | 16 | pat_len[16] |
 | 44 | 64 | entries[32] {pattern, repeats} |
-| 108 | 32 | drum[4][8]: engine, decay, A, B, tune (64 = 0), vel-sens, –, – |
+| 108 | 32 | drum[4][8]: engine, decay, A, B, tune (64 = 0), vel-sens, (v8) click/grit, – |
+
+Drum param 5, **vel-sens**: `level = 127 − (127 − vel) × sens / 128` (0 = every
+hit at full level, 127 = the step velocity sets the level fully, default 100).
+Drum param 6 (v8), **x**: Kick = click level, every other engine = grit
+(0 = off, the sound of 0.4.2). Drum param 3 (B) of the Snare is a continuous
+snare → clap morph since v8: ≤ 44 snare, ≥ 84 clap (both as in 0.4.2), 45–83
+blended (0.4.2: a switch at 64).
 | 140 | 16 | cv[2][8]: gate (1/16 row, 0 = tie), glide, transpose (64 = 0), … |
 | 156 | 48 | mix[6][8]: level, pan (64 = C), drive, tone (64 = flat), VCA decay, mute (≥64), vcaSrc, inGate. `vcaSrc` and `inGate` are only used on the IN channels 4–5 (v3). |
 | 204 | 8 | master: level, drive, filter (64 = off), then (v6) reverb **return** (default 96; 90 ≈ 0 dB, 127 = +6 dB), **size** (64; delay lengths 40–100 %), **decay** (64; T60 = 0.3·30^(v/127) s = 0.3–9 s), **tone** (56; damping, low = dark), **lo-fi** (40; bits dropped = v/16, wobble depth = v/8 samples, sample-and-hold output from 64) |
@@ -206,8 +213,22 @@ synced into the editor's song.
 Protocol versions: 1 = fw 0.1, 2 = fw 0.2 (6 tracks, 4-byte cells), 3 = fw 0.3.0
 (8 tracks, 6-byte cells with a second effect), 4 = fw 0.3.1 (8 tracks,
 4-byte cells: the second effect was removed again because it did not fit the
-editor), 5 = fw 0.3.2, **6 = fw 0.4.0/0.4.1** (lo-fi reverb), **7 = fw 0.4.2** (live mutes for the reverb return and the master). Protocol 4 is 3 without the second effect; everything else (header,
+editor), 5 = fw 0.3.2, **6 = fw 0.4.0/0.4.1** (lo-fi reverb), **7 = fw 0.4.2** (live mutes for the reverb return and the master), **8 = fw 0.4.3** (kick click, grit, snare/clap morph). Protocol 4 is 3 without the second effect; everything else (header,
 Status, Panel, SetMacroMask) is identical.
+
+**v8 (fw 0.4.3)** gives drum param 6 (until v7 a reserved byte that SetDrum
+already accepted and stored) a meaning: Kick click / grit, see the header
+table. fx_ver becomes 2 (header_sanitize and `Song.migrateFx` clear drum bytes 6/7 of
+fx_ver-1 songs; cross-checked in `web/test/xcheck.test.mjs`). The wire format,
+the cell format and the flash format (3) are unchanged.
+
+* **Editor 0.4.3 + module ≤ 0.4.2 (protocol ≤ 7):** works; the Click/Grit knob
+  is greyed out and nothing is sent for it; the header goes out with fx_ver 1
+  (so 0.4.0–0.4.2 keep their reverb settings). Snare B between 45 and 83 plays
+  the old switch on such a module.
+* **Module 0.4.3 + editor ≤ 0.4.2:** works, but the old editor sends its
+  header with fx_ver 1, and the module then resets Click/Grit to 0 on all four
+  voices (the reverb is kept). Use the 0.4.3 editor with 0.4.3 firmware.
 
 **v7 (fw 0.4.2)** adds two **live mutes** as SetMaster params 8 (reverb return)
 and 9 (master output), value ≥ 64 = muted, reported back in Status flags bit

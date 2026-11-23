@@ -1,5 +1,6 @@
 // Renders the factory demo song through the host engine to WAV files:
-// dry (as stored) and with the lo-fi reverb sends turned up.
+// dry (as stored) and with the lo-fi reverb sends turned up. Since 0.4.3
+// also single-voice demos of the kick click, the snare/clap morph and grit.
 // Build: g++ -std=c++17 -O2 -I src tools/sound_check/wav_demo.cpp -o wav_demo
 // Run:   ./wav_demo docs/audio
 // The 12-bit DAC codes are written as 16-bit PCM (code << 4), 48 kHz stereo.
@@ -55,6 +56,29 @@ static std::vector<int16_t> render(double play, double tail, double* corr = null
     return pcm;
 }
 
+// One voice, hit after hit (mono into both channels). Grit runs after the
+// voice exactly as in the engine (GritState on the voice output).
+struct Hit { uint8_t engine, note, decay, a, b, x; double len; };
+static std::vector<int16_t> render_hits(const std::vector<Hit>& hits) {
+    std::vector<int16_t> pcm;
+    for (const Hit& h : hits) {
+        DrumVoice v;
+        v.trigger(TriggerArgs{h.engine, h.note, 110, h.decay, h.a, h.b, h.x});
+        GritState g;
+        const bool grit = h.engine != EngKick && h.x != 0;
+        if (grit) g.set(h.x);
+        const int n = static_cast<int>(h.len * kSampleRate);
+        for (int i = 0; i < n; ++i) {
+            int32_t y = v.render();
+            if (grit) y = g.process(y);
+            y = y > 32767 ? 32767 : y < -32768 ? -32768 : y;
+            const int16_t o = static_cast<int16_t>(y * 3 / 4);
+            pcm.push_back(o); pcm.push_back(o);
+        }
+    }
+    return pcm;
+}
+
 int main(int argc, char** argv) {
     const std::string dir = argc > 1 ? argv[1] : ".";
     song_clear(song_b);
@@ -74,5 +98,20 @@ int main(int argc, char** argv) {
     double corr = 0; int stop_ms = 0;
     write_wav(dir + "/demo_reverb.wav", render(16.0, 4.0, &corr, &stop_ms));
     std::printf("reverb version: L/R correlation %.3f, tail stopped %d ms after the song stopped\n", corr, stop_ms);
+    // Kick: click 0 (the old kick), 30, 60, 90, 127, twice each.
+    std::vector<Hit> k;
+    for (uint8_t x : {0, 0, 30, 30, 60, 60, 90, 90, 127, 127}) k.push_back(Hit{EngKick, 36, 56, 64, 40, x, 0.5});
+    write_wav(dir + "/kick_click.wav", render_hits(k));
+    // Snare -> clap: B 30..100 in steps of 5 (morph zone 44..84).
+    std::vector<Hit> sn;
+    for (int b = 30; b <= 100; b += 5) sn.push_back(Hit{EngSnare, 50, 56, 64, static_cast<uint8_t>(b), 0, 0.42});
+    write_wav(dir + "/snare_clap_morph.wav", render_hits(sn));
+    // Grit: Metal, Pluck, Modal, each with grit 0 (as before), 32, 64, 96, 127.
+    std::vector<Hit> gr;
+    const Hit base[3] = {{EngMetal, 62, 70, 40, 64, 0, 0.6}, {EngPluck, 45, 76, 70, 40, 0, 0.6}, {EngModal, 60, 72, 64, 64, 0, 0.6}};
+    for (const Hit& b : base)
+        for (uint8_t x : {0, 32, 64, 96, 127}) { Hit h = b; h.x = x; gr.push_back(h); }
+    write_wav(dir + "/grit_demo.wav", render_hits(gr));
+    std::printf("wrote kick_click.wav, snare_clap_morph.wav, grit_demo.wav\n");
     return 0;
 }

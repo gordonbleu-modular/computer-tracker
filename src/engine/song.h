@@ -74,7 +74,10 @@ enum DrumEngine : uint8_t {
 };
 
 // Drum voice parameters.
-enum DrumParam { DpEngine = 0, DpDecay, DpA, DpB, DpTune, DpLevelVel, DpR6, DpR7 };
+// DpLevelVel = velocity sensitivity (0 = every hit at full level, 127 = the
+// step's VEL sets the level fully). DpX (0.4.3, fx_ver 2) = Kick: click level,
+// other engines: grit (0 = off, the 0.4.2 sound).
+enum DrumParam { DpEngine = 0, DpDecay, DpA, DpB, DpTune, DpLevelVel, DpX, DpR7 };
 // CV track parameters.
 enum CvParam { CpGate = 0, CpGlide, CpTranspose, CpR3, CpR4, CpR5, CpR6, CpR7 };
 // Mixer channel parameters (channels 0-3 drums, 4-5 audio inputs).
@@ -92,7 +95,9 @@ enum VcaSrc : uint8_t {
 // Master parameters. 3..7: the lo-fi reverb (0.4.0, song header fx_ver 1).
 enum MasterParam { MsLevel = 0, MsDrive, MsFilter, MsRvReturn, MsRvSize, MsRvDecay, MsRvTone, MsRvLofi };
 constexpr uint8_t kRvDefaults[5] = {96, 64, 64, 56, 40};   // return, size, decay, tone, lo-fi
-constexpr uint8_t kFxVersion = 1;   // SongHeader::fx_ver of a 0.4.0 song
+// SongHeader::fx_ver: 1 = 0.4.0 (reverb fields valid), 2 = 0.4.3 (drum param
+// DpX valid; older songs may hold anything in the reserved bytes 6 / 7).
+constexpr uint8_t kFxVersion = 2;
 
 enum Macro { MacroDecay = 0, MacroColour = 1, MacroFilter = 2 };
 
@@ -203,8 +208,11 @@ inline void header_sanitize(SongHeader& s) {
     for (uint8_t& v : s.macro_excl) v &= 0x0F;
     for (uint8_t& v : s.macro_cvin) v &= 0x0F;
     if (s.fx_ver != kFxVersion) {
-        for (uint8_t& v : s.fx_send) v = 0;
-        for (int i = 0; i < 5; ++i) s.master[MsRvReturn + i] = kRvDefaults[i];
+        if (s.fx_ver != 1) {   // before 0.4.0: no reverb
+            for (uint8_t& v : s.fx_send) v = 0;
+            for (int i = 0; i < 5; ++i) s.master[MsRvReturn + i] = kRvDefaults[i];
+        }
+        for (auto& d : s.drum) d[DpX] = d[DpR7] = 0;   // before 0.4.3: no click / grit
         s.fx_ver = kFxVersion;
     }
     for (uint8_t& v : s.fx_send) v = c7(v);

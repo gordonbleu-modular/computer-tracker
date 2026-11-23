@@ -10,7 +10,9 @@ export const DEVICE = 0x54; // 'T'
 //                27 fx version, Status +1 byte (reverb return meter).
 // v7 (fw 0.4.2): SetMaster 8 = reverb return mute, 9 = master mute (>= 64 = muted), live only
 //                (not in the song); Status flags bit 32 / 64 report them.
-export const PROTOCOL_VERSION = 7;
+// v8 (fw 0.4.3): drum param 6 = Kick click / grit (other engines), song fx_ver 2 (0.4.0-0.4.2
+//                songs: param 6/7 cleared on load). Snare/clap morph: same param B, no wire change.
+export const PROTOCOL_VERSION = 8;
 
 export const K = {
   drumTracks: 4,
@@ -81,23 +83,24 @@ export const CMD = {
 };
 
 export const ENGINES = [
-  { name: 'Kick', a: 'Sweep', b: 'Drive', info: 'Sine with pitch sweep and drive' },
-  { name: 'Pluck', a: 'Bright', b: 'Stretch', info: 'Karplus-Strong string' },
-  { name: 'Noise', a: 'Reso', b: 'Sweep', info: 'Pitched band-pass noise' },
-  { name: 'Metal', a: 'Ratio', b: 'Index', info: '2-op FM, inharmonic ratios' },
-  { name: 'Modal', a: 'Material', b: 'Strike', info: '3-mode resonator (bars, bells, glass...)' },
-  { name: 'Snare', a: 'Noise', b: 'Snap/Clap', info: 'Body + noise; B > 64 = clap' },
+  { name: 'Kick', a: 'Sweep', b: 'Drive', x: 'Click', info: 'Sine with pitch sweep and drive' },
+  { name: 'Pluck', a: 'Bright', b: 'Stretch', x: 'Grit', info: 'Karplus-Strong string' },
+  { name: 'Noise', a: 'Reso', b: 'Sweep', x: 'Grit', info: 'Pitched band-pass noise' },
+  { name: 'Metal', a: 'Ratio', b: 'Index', x: 'Grit', info: '2-op FM, inharmonic ratios' },
+  { name: 'Modal', a: 'Material', b: 'Strike', x: 'Grit', info: '3-mode resonator (bars, bells, glass...)' },
+  { name: 'Snare', a: 'Noise', b: 'Snr>Clap', x: 'Grit', info: 'Body + noise; B morphs snare -> clap' },
 ];
 export const MATERIALS = ['Membrane', 'Marimba', 'Glock', 'Bell', 'Tube', 'Plate', 'Glass', 'Gong'];
 
-export const DRUM_PARAMS = ['engine', 'decay', 'a', 'b', 'tune', 'velSens'];
+export const DRUM_PARAMS = ['engine', 'decay', 'a', 'b', 'tune', 'velSens', 'x'];
+export const DRUM_X = 6; // v8: Kick click level / grit (Pluck, Noise, Metal, Modal, Snare); 0 = off
 export const CV_PARAMS = ['gate', 'glide', 'transpose'];
 export const MIX_PARAMS = ['level', 'pan', 'drive', 'tone', 'vca', 'mute', 'vcaSrc', 'inGate'];
 export const MASTER_PARAMS = ['level', 'drive', 'filter', 'rvReturn', 'rvSize', 'rvDecay', 'rvTone', 'rvLofi'];
 // Reverb (v6): master params 3..7, defaults as kRvDefaults in song.h.
 export const RV = { return: 3, size: 4, decay: 5, tone: 6, lofi: 7 };
 export const RV_DEFAULTS = [96, 64, 64, 56, 40];
-export const FX_VERSION = 1;
+export const FX_VERSION = 2; // 1 = 0.4.0 (reverb fields), 2 = 0.4.3 (drum param 6 valid)
 export const MASTER_MUTE = { reverb: 8, master: 9 }; // v7 SetMaster live-mute params (not stored)
 export const MIX_SEND = 8; // SetMix pseudo-parameter for the send
 export const rvSeconds = (d) => 0.3 * Math.pow(30, d / 127); // decay param -> -60 dB time (dsp.h)
@@ -288,10 +291,15 @@ export class Song {
   get fxVer() { return this.header[OFF.fxVer]; }
   // Songs from before 0.4.0: sends 0 and reverb defaults (same as header_sanitize()
   // in song.h), so they sound exactly as before. Returns true when it changed something.
+  // Songs from 0.4.0-0.4.2 (fx_ver 1) keep the reverb and get click/grit 0.
   migrateFx() {
-    if (this.header[OFF.fxVer] === FX_VERSION) return false;
-    for (let c = 0; c < K.channels; c++) this.setSend(c, 0);
-    RV_DEFAULTS.forEach((v, i) => this.setMaster(RV.return + i, v));
+    const v = this.header[OFF.fxVer];
+    if (v === FX_VERSION) return false;
+    if (v !== 1) {
+      for (let c = 0; c < K.channels; c++) this.setSend(c, 0);
+      RV_DEFAULTS.forEach((x, i) => this.setMaster(RV.return + i, x));
+    }
+    for (let d = 0; d < K.drumTracks; d++) { this.header[OFF.drum + d * 8 + 6] = 0; this.header[OFF.drum + d * 8 + 7] = 0; }
     this.header[OFF.fxVer] = FX_VERSION;
     return true;
   }
@@ -421,7 +429,13 @@ export const msg = {
   setName: (song) => frame(CMD.SetName, Array.from(song.header.slice(OFF.name, OFF.name + K.nameLen))),
   setZeroNote: (n) => frame(CMD.SetZeroNote, [n]),
   setMacroMask: (m, bits, cvin) => frame(CMD.SetMacroMask, cvin === undefined ? [m, bits & 0x0f] : [m, bits & 0x0f, cvin & 0x0f]),
-  setHeader: (song) => frame(CMD.SetHeader, Array.from(song.header)),
+  // Firmware 0.4.0-0.4.2 (protocol 6/7) knows fx_ver 1 only and would reset the
+  // reverb of anything else: send it fx_ver 1 (it ignores drum param 6 anyway).
+  setHeader: (song, proto = PROTOCOL_VERSION) => {
+    const h = Array.from(song.header);
+    if (proto < 8 && h[OFF.fxVer] === FX_VERSION) h[OFF.fxVer] = 1;
+    return frame(CMD.SetHeader, h);
+  },
   stop: () => frame(CMD.Transport, [0, 0]),
   playSong: (entry = 0) => frame(CMD.Transport, [1, entry]),
   playPattern: (p) => frame(CMD.Transport, [2, p]),
@@ -435,7 +449,7 @@ export const msg = {
 
 // All messages needed to replace the module's song with `song`.
 export function uploadMessages(song, proto = PROTOCOL_VERSION) {
-  const out = [msg.setHeader(song)];
+  const out = [msg.setHeader(song, proto)];
   const tracks = proto >= 3 ? K.tracks : K.v2Tracks;
   for (let p = 0; p < K.patterns; p++)
     for (let t = 0; t < tracks; t++)
