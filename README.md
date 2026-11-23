@@ -1,450 +1,215 @@
 # Workshop Tracker
 
-A **tracker sequencer and drum synth program card** for the
+**▶ [Open the web app](https://gordonbleu-modular.github.io/computer-tracker/)** (Chrome or Edge) · [Download the firmware](https://github.com/gordonbleu-modular/computer-tracker/releases)
+
+A **tracker sequencer with four drum-synth voices** for the
 [Music Thing Modular Workshop System](https://www.musicthing.co.uk/workshopsystem/)
-**Computer** module (RP2040), plus a **browser editor** that controls it over
-USB.
+**Computer** module, plus a **browser editor** that controls it over USB.
 
-* **4 drum-synth voices** run **on the module**: Kick, Karplus-Strong Pluck,
-  pitched band-pass Noise, 2-op FM Metal, 3-mode Modal resonator, Snare/Clap.
-* A **stereo mixer** (level, pan, drive, tone, mute + master filter/drive) to
-  **audio out 1/2**, with a **lo-fi stereo reverb** on a send (0.4.0): a send
-  knob per channel, return / size / decay / tone / lo-fi.
-* **2 CV/gate tracks** for the Workshop System's two analogue VCOs: calibrated
-  **1 V/oct on CV out 1/2** (C0 = 0 V … B5 = 5.92 V, positive only), gates on
-  **pulse out 1/2**, glide/slide.
-* **Audio in 1/2** bring the VCOs back into the mix through a **VCA each**,
-  played by its own **IN track** (trigger, level, hold, decay, effects) or by
-  the CV track's gate.
-* **Tracker**: 16 patterns × 64 rows × **8 tracks** (4 drums, CV1, CV2, IN1,
-  IN2). Each step has note, velocity (not on CV tracks: a gate is on or off) and **one effect** (param locks, ratchets,
-  probability, micro-delay, gate length, slide, reverb send). Values are shown and typed as
-  **00–99**. A 32-step song arrangement, tempo, swing.
-* **Performance mode without a computer**: 6 song slots in flash, start / next
-  part / stop on the Z switch, knob macros, external clock & reset, CV
-  modulation.
-
-> **Status:** versions 0.1 and 0.2 have been tested on a real Computer (USB,
-> sound engines, panel, knob feedback, editor). The **0.3** additions (IN
-> tracks, CV/IN macros, new flash slot format, slot-select fix, timing changes
-> in the audio core; 0.3.1 removed 0.3.0's second effect column again; 0.3.2:
-> positive-only CV with C0 = 0 V, no CV velocity, the new slot knob) are
-> covered by host tests, a JS↔firmware cross-check and headless-browser tests against a simulated
-> module, but **have not run on hardware yet**. The same goes for **0.4.0–0.4.3**
-> (audio-core optimisations + lo-fi reverb, per-step send, live mutes; 0.4.3:
-> kick click, snare→clap morph, grit):
-> host-tested, drum sounds checked sample by sample against 0.3.2 (0.4.2:
-> bit-identical to 0.4.1 when nothing is muted; 0.4.3: bit-identical to 0.4.2
-> with click/grit at 0, except snare B 45–83, which is now the morph zone),
-> CPU measured in the emulator; not yet on a module. See [Known risks](#known-risks).
-
-![Editor at 1366×768: tracker grid with the keyboard sketch below it](docs/screenshot-grid-keyboard-1366x768.png)
+* **4 drum voices on the module**, each one of six engines: Kick, Pluck,
+  Noise, Metal, Modal, Snare/Clap.
+* **2 CV/gate tracks** that play the Workshop System's two analogue VCOs
+  (1 V/oct on CV out 1/2, gates on pulse out 1/2).
+* **Audio in 1/2** bring the VCOs back into the mix through a VCA each,
+  played by their own **IN tracks**.
+* A **stereo mixer** with a **lo-fi reverb** on a send, out on audio out 1/2.
+* **16 patterns × 64 rows × 8 tracks**, one effect per step, a song
+  arrangement, tempo and swing. All values are typed as **00–99**.
+* **Plays without a computer**: 6 song slots in flash, start / next part /
+  stop, knob macros, external clock and reset.
 
 Deutsch: [README.de.md](README.de.md)
 
+![Editor: tracker grid with the keyboard sketch](docs/screenshot-grid-keyboard-1366x768.png)
+
 ## Quick start
 
-1. **Flash the card.** Download `workshop_tracker.uf2` (in `dist/` or from
-   the GitHub release). With the card in the Computer and USB-C plugged into
-   your computer, pull off the main knob, hold the BOOTSEL button behind it, and
-   tap the load/reset button next to the card slot. Drag the UF2 onto the
-   `RPI-RP2` drive. (Official guide:
-   <https://www.musicthing.co.uk/workshopsystem/program-cards/install/>)
-2. **Patch** (minimum): audio out 1/2 → mixer / headphones (stereo L/R).
-   For the VCOs: CV out 1 → VCO 1 pitch, CV out 2 → VCO 2 pitch, VCO outputs →
-   audio in 1/2. Pulse out 1/2 are gates (envelopes / VCAs) if you want them.
-3. **Open the editor** in Chrome or Edge:
-   *GitHub Pages:* `https://<your-user>.github.io/mtm-tracker/`
-   *or locally:* `npx serve web` → <http://localhost:3000>
-   (or `cd web && python3 -m http.server 8000` → <http://localhost:8000>).
-   It must be `https://` or `localhost`. Opening `index.html` from disk does not work, because WebMIDI SysEx needs a secure context.
-4. Click **Connect** and allow MIDI/SysEx access. The editor reads the song
-   from the module. Edits go to the module immediately; **Save to module**
-   writes the song to the selected flash slot.
-5. Unplug USB whenever you like: the module keeps running and is played
-   from the panel (see [docs/CONTROLS.md](docs/CONTROLS.md)).
+1. **Flash the card:** with the card in the Computer and USB plugged in, hold
+   the BOOTSEL button (behind the main knob), tap the reset button and drag
+   `workshop_tracker.uf2` (from [Releases](https://github.com/gordonbleu-modular/computer-tracker/releases) or `dist/`) onto the `RPI-RP2` drive
+   ([official guide](https://www.musicthing.co.uk/workshopsystem/program-cards/install/)).
+2. **Patch:** audio out 1/2 → headphones or mixer (L/R). For the VCOs see
+   [Audio routings](#audio-routings-with-the-two-vcos).
+3. **Open the editor** in Chrome or Edge (WebMIDI with SysEx):
+   <https://gordonbleu-modular.github.io/computer-tracker/> (or locally: `cd web && python3 -m http.server 8000`
+   → <http://localhost:8000>).
+4. **Connect** and allow MIDI/SysEx. Edits play on the module at once;
+   **Save to module** stores the song in the selected slot.
+5. Unplug USB whenever you like: the module keeps playing from its panel.
 
-The editor also works **offline** (no module). Songs are autosaved in the
-browser and can be exported/imported as `.wtrk.json`.
+The editor also works offline; songs can be exported as `.wtrk.json`.
 
-## The editor
-
-| Area | |
-| --- | --- |
-| Top bar | Connect, transport (song / pattern / stop / next part), BPM, swing, position readout (mode · part · pattern · row, beat LED), CPU load of the module |
-| Toolbar | song name, **SLOT n** (the slot the module plays, `· edited` when the editor has unsaved changes), flash slot load/save, read from / send to module, new, demo, export/import, octave, **step jump** (rows the cursor moves after an entry), edit mode, follow, **⌨** keyboard sketch on/off, Keys (help) |
-| Left | song arrangement (pattern × repeats, ▶ to start or cue an entry), pattern selector & length, copy/paste/clear, **effect legend** for the track under the cursor, **Computer · Live** panel (the module's Main/X/Y knobs and Z page) |
-| Centre | the tracker grid; under it the **keyboard sketch** (which computer key plays which note, see below); at the bottom a **status line** that explains the field under the mouse or cursor |
-| Right, tab **Drum voices** | four Eurorack-style modules: engine, routing buttons **MAIN** / **X**, knobs Decay, A, B, Tune, Vel and Click (Kick) / Grit (all other engines, 0.4.3); the red LED lights on every hit. Each module wears a faceplate that matches its engine (0.4.2, see below) |
-| Right, tab **Mixer** | DR1–DR4, **IN1**, **IN2** (audio inputs), **REVERB** and Master: level, pan, drive, tone, VCA decay (inputs), **send** (to the reverb), a **MUTE** switch on every strip including REVERB and MASTER (0.4.2), meters (peak, with ≈10 ms attack, ≈300 ms release and a 1 s peak-hold mark), master filter. REVERB: return, size, decay, tone, lo-fi, a return meter and a LED while the tail rings |
-| Right, tab **CV / IN** | **CV/GATE 1, 2**: gate length, glide, transpose, MAIN/X routing · **CV RANGE**: scale of the note ↔ voltage mapping (C0 = 0 V … C5 = 5 V) · **IN 1, 2 VCA**: source (OPEN / CV GATE / IN TRACK), decay, hold, drive, MAIN/X routing, TEST |
-
-**Knobs:** drag up/down (Shift = fine), mouse wheel, double-click resets,
-and arrow keys / PgUp / PgDn / Home / End work when a knob is focused.
-
-**Live feedback from the module (firmware ≥ 0.2):** the module's PERFORM
-macros are **offsets** on top of the song values, never saved. In the editor
-the **gold arc** is the song value, and a **red arc + dot** is what the module
-plays right now (drum Decay, CV gate length and IN VCA decay via Main; param
-A, CV glide and IN drive via X; master Filter via Y + CV in 2). Tempo, swing, slot and play position changed on the panel are shown
-live. Per drum voice, CV track and audio input, **MAIN** and **X** choose
-whether the Main / X macro affects it. This routing is stored in the song.
-
-![CV / IN tab](docs/screenshot-cvin-1366x768.png)
-
-### Drum module faceplates (0.4.2)
-
-![All six faceplates and the Mixer](docs/screenshot-voices-mixer-montage.png)
-
-The Drum voices tab looks like a small Eurorack row: each drum module changes
-its faceplate when you pick another engine. Only the look changes (panel,
-print, knob caps); the knobs, their places and what they do are the same for
-every engine. The panels carry no logos or brand names; each borrows the feel
-of a real module on ModularGrid:
-
-| Engine | Faceplate | Inspired by |
-| --- | --- | --- |
-| Kick | black panel, white bold condensed caps, red rule under the title, silver knobs with red pointers, a decaying-sine line on the name plate | [Befaco Kickall](https://modulargrid.net/e/befaco-kickall) |
-| Pluck | light aluminium, quiet dark sans-serif print, big white knobs, three coloured dots, dashed guide lines | [Mutable Instruments Rings](https://modulargrid.net/e/mutable-instruments-rings) |
-| Noise | cream panel with thin black line doodles (spirals, arrows, zig-zags), italic lower-case labels, blue knobs | [Make Noise Wogglebug](https://modulargrid.net/e/make-noise-wogglebug) |
-| Metal | brushed aluminium, serif small caps, black knobs with a white line | [Mannequins Mangrove](https://modulargrid.net/e/mannequins-mangrove) |
-| Modal | deep purple with a fine dot grid, lavender print, small black knobs | [Noise Engineering Basimilus Iteritas Alter](https://modulargrid.net/e/noise-engineering-basimilus-iteritas-alter) |
-| Snare | silver-white, black bold italic caps, knurled black knobs, black name plate | [Tiptop Audio SD909](https://modulargrid.net/e/tiptop-audio-sd909) |
-
-The gold (song value) and red (live macro) arcs are the same on every panel;
-text sizes and colours were checked for contrast (labels ≥ 9:1, values ≥ 5:1,
-the red live value ≥ 5:1 on the light panels). The mixer, CV / IN tab and the
-rest of the editor keep the Workshop System look. The decorative mini-jacks at
-the bottom of the drum modules and mixer strips are gone (they did nothing);
-the CV / IN tab keeps its jack labels, which name the real sockets.
-More: [docs/screenshot-voices-models-1366x768.png](docs/screenshot-voices-models-1366x768.png).
-
-### Lo-fi reverb (0.4.0)
-
-![Mixer tab with send knobs and the REVERB module](docs/screenshot-mixer-1366x768.png)
-
-A deliberately cheap, grainy stereo reverb in the spirit of early digital
-reverbs, running on the module next to the drums. Each mixer channel has a
-**Send** knob (after level and mute; square law, 50 % ≈ −12 dB). The return
-goes into the master bus before the master filter and drive.
-
-| Knob | Range | What it does |
-| --- | --- | --- |
-| Return | 0–100 % (≈71 % = 0 dB, 100 % = +6 dB) | wet level into the master |
-| Size | 40–100 % | length of the four delay lines (71–125 ms at 100 %); turning it bends the pitch of the tail a little, like tape |
-| Decay | 0.3–9 s | time to −60 dB |
-| Tone | dark … bright | damping inside the tail |
-| Lo-fi | clean … gritty | drops low bits of the tail (16 → 9 bit), adds a slow pitch wobble, from 50 % on sample-and-hold (aliased) output |
-
-Inside: the send sum is averaged down to **16 kHz**, goes through two
-allpass diffusers into a **4-line feedback delay network** (Hadamard matrix,
-one damping low-pass and one decay gain per line, 16-bit lines), and the
-left/right outputs tap different lines, so the stereo image is wide
-(L/R correlation of the return ≈ −0.2). When nothing is sent and the tail is
-below the output resolution, the reverb switches itself off (no CPU, exactly
-silent). Songs from older versions load with all sends at 0 and sound exactly
-as before. Listen: [docs/audio/demo_dry.wav](docs/audio/demo_dry.wav) and
-[docs/audio/demo_reverb.wav](docs/audio/demo_reverb.wav) (the demo song, dry and
-with a little send on the kick and more on drums 2–4; rendered by the firmware code on the
-host).
-
-**Mutes (0.4.2).** Every mixer strip has a **MUTE** switch. DR1–DR4, IN1
-and IN2 mute their channel (and its send); these are song values, saved with
-the slot as before. **REVERB** mutes only the return: the reverb keeps running,
-so unmuting brings back the tail that is still ringing. **MASTER** mutes the
-whole output. Both fade over ≈ 5 ms (no click), are **live switches that are
-not saved** with the song (a slot that powers up silent on stage would be a
-trap), and are off after power-up. They need firmware 0.4.2 (protocol 7); with
-older firmware they are greyed out. With nothing muted the output is
-bit-identical to 0.4.1.
-
-### The grid
-
-Every track has small column labels: **NOTE VEL FX** (CV tracks: **NOTE FX**,
-IN tracks: **TRIG LVL FX**). Each step has one effect. Rows and patterns count from 01. All
-values are two decimal digits, **00–99** (stored as 0–127 inside where needed);
-`..` means "default". The grid font scales with the window, so all 8 tracks
-always fit without scrolling sideways (13 px at 1366×768, 16 px at 1920×1080).
-
-| Track | NOTE / TRIG | VEL / LVL |
-| --- | --- | --- |
-| Drum 1–4 | pitch, `OFF` chokes | how hard the voice is hit (`..` = 79) |
-| CV1, CV2 | pitch on CV out (**C-0 … B-5 = 0 … 5.92 V**, the octave digit is the voltage), gate on pulse out, `OFF` = gate off | – (no velocity: an IN VCA that follows the CV gate opens fully, the mixer level sets the volume) |
-| IN1, IN2 | any note key = trigger (shown `TRG`), `OFF` closes | VCA level (`..` = full) |
-
-Typing a trigger on an IN track switches that input's VCA source to IN TRACK
-(the editor tells you); the source can be changed on the CV / IN tab.
-
-**Effects:** click an FX cell or press **Enter** on it for a list of the
-effects that work on that track, with a short description. Or type the letter.
-The legend on the left lists them too, and the status line names the effect
-under the cursor.
-
-| FX | Tracks | Value |
-| --- | --- | --- |
-| `A` Param A lock | drum | A for this hit, 00–99 |
-| `B` Param B lock | drum | B for this hit, 00–99 |
-| `D` Decay lock | drum, IN | decay / VCA release for this hit, 00–99 |
-| `G` Gate length | CV, IN | 1/16 row: 08 = half a row, 16 = a row, 00 = hold |
-| `S` Slide | CV | glide into this note, gate stays high, 00–99 |
-| `R` Ratchet | all | 02–08 repeats in the row |
-| `P` Probability | all | chance in %, 00–99 |
-| `K` Delay | all | n/16 row late, 01–15 |
-| `W` Reverb send | drum, IN | reverb send for this hit, 00–99 (0.4.1) |
-
-**`W` (reverb send per hit, firmware 0.4.1).** `W` ("wet"; R was taken by
-Ratchet) sets the channel's reverb send for that hit instead of the mixer's
-Send knob, with the same law (50 ≈ −12 dB, 99 = full, after level and mute).
-The hit's whole tail keeps that send until the next hit on the same track;
-a hit without `W` goes back to the knob. Ratchets repeat it, a step skipped by
-`P` changes nothing. The change glides over at most ≈5 ms, so it never clicks
-in the reverb. The dry sound is not touched. CV tracks are not in the mix, so
-the editor does not offer `W` there (the firmware ignores it). Firmware 0.4.0
-and older ignore the letter, so songs stay compatible both ways.
-
-**CV voltages.** CV out is 1 V/octave with **C0 = 0 V**: `C-0` = 0 V, `C-1` =
-1 V, `A-2` = 2.75 V, up to `B-5` = 5.917 V. Only positive voltages are used
-(the Workshop System VCOs do not track below 0 V), so on CV tracks the octave
-selector stops at 5 and notes typed above B5 are folded down by an octave.
-Transposing (track *Transp*, CV in 1) that would leave 0…5.92 V is folded back
-by octaves too, so CV out never goes negative. Songs from older versions are
-converted: CV notes keep their voltage (with the old default "0 V note = C2",
-a `C-2` becomes `C-0`), notes that used to sit at 0 V or 6 V are moved by whole
-octaves into range, and CV velocities are dropped.
-
-**Keyboard sketch.** Under the grid the editor draws the computer keyboard
-(toggle with **⌨**, also in the *Keys* dialog): each key shows its letter and
-the note it plays in the current octave, for the track under the cursor (IN
-tracks: `TRG`). `1` (red) is OFF, `-` / `=` (silver) change the octave. Keys
-work by position, so on a German keyboard the bottom row starts at **Y**; the
-sketch prints QWERTZ letters when the browser reports a German layout, and the
-QWERTY / QWERTZ button switches the lettering by hand. The pressed key lights
-up.
-
-**Keys** (press *Keys* in the app for the full list): piano layout on
-`Z S X D C V…` (lower octave; QWERTZ: `Y S X D C V…`) and `Q 2 W 3 E R…` (upper), `1` = note OFF,
-digits `0-9` in the VEL and value columns (one digit, then a second one for two
-digits: `7` `5` = 75), `Shift+↑/↓` = ±1 (`Shift+PgUp/PgDn` = ±10), effect
-letters or `Enter` in the FX columns, `Delete` clears, arrows / Tab / PgUp /
-PgDn move, `-`/`=` change the octave, `Space` plays/stops the pattern, `Enter`
-in the NOTE/VEL columns plays the song, `Ctrl+C / Ctrl+V` copy/paste a track.
-
-**Slot changes on the module.** When the slot knob on the module (Z Up)
-switches to another song, the editor notices (song swap counter in the
-Status report) and reads the new song. If the editor had **unsaved edits**
-(the SLOT pill says `· edited`), they are first stored in the browser and a
-banner says so; **Restore** brings them back (then *Send to module* or *Save to
-module*). Nothing is lost silently.
-
-**Older firmware:** with firmware 0.3.1 everything works; the editor puts the
-CV notes into C0–B5, sets the module's 0 V note to C0 and recommends the update
-(slot knob zones, CV in 1 folding). Connected to firmware 0.2 the editor shows a banner,
-dims the IN tracks (not sent), and converts songs read from the module. With
-firmware 0.3.0 (which had a second effect column) everything works, the
-editor clears the second effect of every step it writes and recommends the
-update; songs read from 0.3.0 keep only one effect (the second is dropped, or
-used if the first column was empty).
-
-## Voices
-
-All synthesis is fixed-point integer DSP at 48 kHz (no FPU on the RP2040),
-with envelopes and coefficients at control rate (every 8 samples).
-
-| Engine | Algorithm | A | B |
-| --- | --- | --- | --- |
-| **Kick** | sine oscillator with exponential pitch sweep (up to ~8× start pitch) and soft-clip drive; optional beater **click** | sweep depth | drive |
-| **Pluck** | Karplus-Strong string: noise-burst excitation into a fractional-delay line with a damping filter; loss scaled by pitch so decay is even across the keyboard | brightness of the excitation | damping / stretch |
-| **Noise** | white noise through a resonant Chamberlin state-variable band-pass tuned to the note, with an envelope-driven sweep and loudness compensation | resonance (from hiss to whistling) | sweep amount |
-| **Metal** | 2-operator FM with a table of inharmonic ratios and its own index envelope (bells, cowbells, metallic hats) | ratio | FM index |
-| **Modal** | short filtered noise strike into **three tuned resonators** (SVF band-passes) with ratios from 8 materials: membrane, marimba, glock, bell, tube, plate, glass, gong | material | strike hardness |
-| **Snare** | sine body with pitch drop + band-passed noise; B **morphs** from snare to **clap** (three noise bursts) | noise mix | snare → clap |
-
-*Tune* (±48 semitones) and the note column set the pitch. Fx `A`, `B`, `D`
-lock A/B/decay per hit.
-
-**Vel** (velocity sensitivity) decides how much the VEL column of a step
-changes this voice's loudness: `level = 127 − (127 − VEL) × Vel / 128`.
-At 0 every hit plays at full level and the VEL column is ignored for loudness;
-at 127 the VEL column sets the level fully. The default is 100 (shown as 79 %).
-It is a real per-voice setting (accents on the hats, a kick that always hits
-full), so it stays; 0.4.3 only gives it a clearer tooltip and a % readout.
-
-### Click, snare→clap morph and grit (0.4.3)
-
-Every module has a third small knob in its bottom row (byte 6 of the drum
-parameters, reserved until 0.4.2; 0 = off = exactly the old sound):
-
-* **Kick: Click.** A ≈1.5 ms beater click on top of the kick: high-passed noise
-  plus a short 1.6 kHz blip, scaled by the step velocity and fed through the
-  kick's drive. With Click at 0 the kick is bit-identical to 0.4.2. Listen:
-  [docs/audio/kick_click.wav](docs/audio/kick_click.wav) (click 0, 30, 60, 90,
-  127, two hits each).
-* **Snare: snare → clap morph on B.** Until 0.4.2, B jumped from snare to clap
-  at 64 (12 o'clock). Now B ≤ 44 is the snare and B ≥ 84 the clap, both
-  computed exactly as before (bit-identical). In between, the two are blended
-  continuously: the noise colour slides from the snare's band to the clap's,
-  the noise tap moves from the high-pass to the band-pass output along a
-  smooth curve, and the clap's two extra bursts fade in while their spacing
-  grows. A test measures the step from one B value to the next: at most 5 %
-  of the full change. Listen:
-  [docs/audio/snare_clap_morph.wav](docs/audio/snare_clap_morph.wav) (B 30 → 100
-  in steps of 5).
-* **Pluck, Noise, Metal, Modal, Snare: Grit.** A lo-fi fuzz on the voice output:
-  drive ×1…×16 into a hard clip, then fewer bits (16 → 6 at the top) and,
-  from 25 % up, a lower sample rate (sample-and-hold, down to 12 kHz). It works
-  on the output only, so strings and resonators behave as before. Grit makes a
-  voice louder (like a fuzz pedal, up to ≈ +10 dB RMS); turn its mixer level
-  down. Listen: [docs/audio/grit_demo.wav](docs/audio/grit_demo.wav) (Metal,
-  Pluck, Modal, each with grit 0, 32, 64, 96, 127).
-
-Songs from 0.4.2 and older load with Click/Grit at 0. The new knob needs
-firmware 0.4.3 (protocol 8); with older firmware it is greyed out.
-
-## Panel and jacks
-
-| Jack | Function |
-| --- | --- |
-| Audio out 1/2 | stereo mix L/R |
-| Audio in 1/2 | mixer channels **IN1 / IN2** (e.g. the VCOs) through a VCA played by the IN track or the CV gate |
-| CV out 1/2 | 1 V/oct pitch of CV tracks 1/2 (calibrated), C0 = 0 V … B5 = 5.92 V |
-| Pulse out 1/2 | gates of CV tracks 1/2 |
-| Pulse in 1 | clock in, 1 pulse = 1 row (replaces the internal clock while plugged) |
-| Pulse in 2 | reset |
-| CV in 1 | transpose CV tracks, 1 V/oct (folded by octaves, never below 0 V) |
-| CV in 2 | filter macro modulation |
+## The module on its own
 
 | Z | Main | X | Y |
 | --- | --- | --- | --- |
-| **Middle** (PERFORM) | decay macro (routed voices), CV gate length, IN VCA decay | colour macro (param A, routed voices), CV glide, IN drive | master filter LP ↔ HP |
-| **Up** (SELECT) | song slot: the travel is split over the saved slots (2 → 50 %, 3 → 33 / 66 %) | tempo 40–240 | swing 50–75 % |
-| **Down** (momentary) | tap: start / next part · hold 0.8 s: stop | | |
+| **Middle** (PERFORM) | decay macro (drum voices routed to MAIN, CV gate length, IN VCA decay) | colour macro (param A of the voices routed to X, CV glide, IN drive) | master filter: left low-pass, right high-pass |
+| **Up** (SELECT) | song slot (the knob travel is split over the saved slots) | tempo 40–240 BPM | swing 50–75 % |
+| **Down** (push) | tap: start / next song part · hold 0.8 s: stop | | |
 
-Tempo, swing and macros use soft takeover. Details and LED meanings:
+Macros are **offsets** on top of the song: never saved, back at noon = the
+song as programmed. Which voices they reach is set with the **MAIN** / **X**
+buttons on each module in the editor. Knobs use soft takeover. Pulse in 1 is a
+clock input (1 pulse = 1 row), pulse in 2 resets, CV in 1 transposes both CV
+tracks, CV in 2 moves the master filter. On power-up the last slot is loaded,
+stopped. Full control map and LEDs: [docs/CONTROLS.md](docs/CONTROLS.md).
+
+## Drum voices
+
+![The six drum modules: Kick, Pluck, Noise, Metal, Modal, Snare/Clap](docs/drum-modules.png)
+
+Each drum module picks an engine; its faceplate changes with it. All
+modules have the same knobs:
+
+| Knob | What it does |
+| --- | --- |
+| **Decay** | length of the sound |
+| **A**, **B** | two sound parameters, different per engine (below) |
+| **Tune** | ±48 semitones on top of the note in the grid |
+| **Vel** | velocity sensitivity, see [Velocity](#velocity) |
+| **Click / Grit** | Kick: beater click. All other engines: grit. 0 = off |
+| **MAIN / X** | whether the Main / X macro reaches this voice |
+| **TRIG** | plays the voice once |
+
+| Engine | Sound | A | B |
+| --- | --- | --- | --- |
+| **Kick** | sine with a falling pitch sweep and soft-clip drive | **Sweep**: depth of the pitch drop | **Drive**: saturation |
+| **Pluck** | Karplus-Strong plucked string | **Bright**: brightness of the pluck | **Stretch**: low = dark and damped, high = bright and stretched |
+| **Noise** | noise through a resonant band-pass tuned to the note | **Reso**: from hiss to whistle | **Sweep**: how far above the note the filter starts before it falls to the note |
+| **Metal** | 2-operator FM with inharmonic ratios: bells, cowbells, metallic hats | **Ratio**: 16 frequency ratios | **Index**: FM amount (brightness) |
+| **Modal** | short strike into three tuned resonators | **Material**: Membrane, Marimba, Glock, Bell, Tube, Plate, Glass, Gong | **Strike**: hardness of the strike |
+| **Snare** | sine body with pitch drop plus noise, morphing into a clap | **Noise**: noise against body | **Snr>Clap**: snare → clap morph |
+
+**Kick: Click.** A short (≈ 1.5 ms) beater click on top of the kick: high-passed
+noise and a 1.6 kHz blip, louder with the step velocity, through the kick's
+drive. Listen: [kick_click.wav](docs/audio/kick_click.wav).
+
+**Snare: snare → clap.** B up to 44 is the snare (brighter to the right), from
+84 on the clap (three noise bursts, further apart to the right). In between
+the two blend smoothly: the noise colour slides and the clap's extra bursts
+fade in. Listen: [snare_clap_morph.wav](docs/audio/snare_clap_morph.wav).
+
+**Grit** (Pluck, Noise, Metal, Modal, Snare). A lo-fi fuzz on the voice
+output: drive into a hard clip, fewer bits and, from 25 % on, a lower sample
+rate (down to 12 kHz). It makes a voice louder (up to ≈ +10 dB), so turn its
+mixer level down. Listen: [grit_demo.wav](docs/audio/grit_demo.wav). Grit on
+one or two voices is fine; grit on all four in a very dense pattern with lots
+of reverb can make the module crackle.
+
+## Mixer and reverb
+
+Channels DR1–DR4, IN1, IN2: **level, pan, drive, tone** (left darker, right
+thinner, centre flat), **send** to the reverb and a **mute**. IN channels also
+have their VCA (see below). The master has a filter (Y knob) and drive. The
+REVERB and MASTER strips have live mute switches (not saved).
+
+![Mixer tab](docs/screenshot-mixer-1366x768.png)
+
+The **lo-fi reverb** is a deliberately grainy stereo reverb:
+
+| Knob | What it does |
+| --- | --- |
+| Return | wet level into the master (≈ 71 % = 0 dB) |
+| Size | room size; turning it bends the tail's pitch a little, like tape |
+| Decay | 0.3–9 s |
+| Tone | dark … bright tail |
+| Lo-fi | clean … gritty: fewer bits, a slow wobble, from 50 % sample-and-hold |
+
+Listen: [demo_dry.wav](docs/audio/demo_dry.wav) and
+[demo_reverb.wav](docs/audio/demo_reverb.wav).
+
+## Audio routings with the two VCOs
+
+| Jack | Function |
+| --- | --- |
+| CV out 1 / 2 | pitch of CV track 1 / 2, 1 V/oct, **C-0 = 0 V … B-5 = 5.92 V** (the octave digit is the voltage) |
+| Pulse out 1 / 2 | gate of CV track 1 / 2 |
+| Audio in 1 / 2 | mixer channels IN1 / IN2, each through a VCA |
+| CV in 1 | transposes both CV tracks (1 V/oct, folded back by octaves, never below 0 V) |
+| CV in 2 | added to the master filter |
+| Pulse in 1 / 2 | clock (1 pulse = 1 row) / reset |
+
+**Basic patch:** CV out 1 → VCO 1 pitch, CV out 2 → VCO 2 pitch, VCO 1 out →
+audio in 1, VCO 2 out → audio in 2. The **CV / IN** tab sets how each input's
+VCA opens:
+
+* **CV GATE**: the VCA follows the gate of CV track 1 / 2, so the VCO sounds
+  only while its note plays. The simplest way to a bass or lead line.
+* **IN TRACK**: the VCA is played by its own track (IN1 / IN2): TRIG opens it,
+  LVL sets the level, with hold (G), decay (D), ratchets, probability. The VCO
+  can drone while the IN track chops it into rhythms, independent of the
+  melody on the CV track.
+* **OPEN**: always on, e.g. for a drone, or when an envelope and VCA elsewhere
+  in the System do the shaping.
+
+Per CV track the CV / IN tab also has **gate length, glide, transpose**, per
+input **decay, hold, drive** and the MAIN / X macro routing.
+
+**Ideas:**
+
+* Pulse out 1/2 → an envelope in the System, shaping the VCO through the
+  System's filter or VCA before it comes back into audio in 1/2: the module
+  becomes sequencer and mixer for a fully analogue voice.
+* Both VCOs on the same CV out (CV out 1 to both pitch inputs with a stackable
+  cable) and slightly detuned: one fat voice, IN1 and IN2 panned left and right.
+* CV track 1 as a bass line with VCA source CV GATE, CV track 2 as a lead with
+  `S` slides and its VCA played by the IN2 track as rhythmic stabs.
+* Send IN1/IN2 into the reverb with the `W` effect only on single hits for
+  dub-like throws.
+* A slow LFO or random voltage into CV in 1 transposes the CV tracks; into
+  CV in 2 it sweeps the master filter.
+* An external clock into pulse in 1 syncs the tracker to the System (one
+  pulse per row, swing still applies).
+
+![CV / IN tab](docs/screenshot-cvin-1366x768.png)
+
+## The tracker grid
+
+Columns: drum tracks **NOTE VEL FX**, CV tracks **NOTE FX**, IN tracks
+**TRIG LVL FX**. `..` = default. Note `OFF` (key `1`) chokes a drum, closes a
+CV gate or an IN VCA. Under the grid a keyboard sketch shows which computer
+key plays which note (piano layout on `Z S X D C…` and `Q 2 W 3 E…`, also on
+QWERTZ). **Keys** in the editor lists every shortcut.
+
+### Step effects
+
+Every step has **one effect**: a letter and a value 00–99. Type the letter
+in the FX column or press Enter for a list; the status line explains it.
+
+| FX | Tracks | Value | What it does |
+| --- | --- | --- | --- |
+| `A` | drum | 00–99 | **Param A** for this hit only (Sweep, Bright, Reso, Ratio, Material, Noise) |
+| `B` | drum | 00–99 | **Param B** for this hit only (e.g. snare ↔ clap per hit) |
+| `D` | drum, IN | 00–99 | **Decay** for this hit only (IN: VCA release) |
+| `G` | CV, IN | 00–64 | **Gate length** in 1/16 row: 08 = half a row, 16 = one row, 64 = four rows, 00 = hold until the next note or OFF |
+| `S` | CV | 00–99 | **Slide**: glide to this note in the given time (up to ≈ 2 s); the gate stays high (legato) when the previous note is still on |
+| `R` | all | 02–08 | **Ratchet**: the note repeats 2–8 times inside the row (CV/IN gates: half of each repeat) |
+| `P` | all | 00–99 | **Probability** in % that the step plays (00 = never; no P = always) |
+| `K` | all | 01–15 | **Delay**: plays the step n/16 of a row late (08 = half a row, off-beat) |
+| `W` | drum, IN | 00–99 | **Reverb send** for this hit instead of the Send knob (50 ≈ −12 dB, 99 = full); the hit's tail keeps it, the next hit without W goes back to the knob |
+
+Panel macros add on top of `A` and `D` locks just like on the knob values.
+
+### Velocity
+
+* **VEL column (drum tracks):** how hard the step is hit, 01–99;
+  `..` = 79 (the default hit).
+* **Vel knob (on each drum module):** how much the VEL column changes the
+  loudness: `level = 127 − (127 − VEL) × Vel / 128` (in the internal 0–127
+  scale). **0 %** = every hit at full level (VEL ignored), **100 %** = VEL sets the level
+  fully; default 79 %. For example a kick at 0 % always hits full while hats at
+  100 % follow their accents. Velocity also scales the Kick's click.
+* **LVL column (IN tracks):** the VCA level of that trigger, `..` = full.
+* **CV tracks** have no velocity: a gate is on or off. An IN VCA that follows
+  the CV gate opens fully; the mixer level sets the volume.
+
+## More
+
+Protocol and song format: [docs/PROTOCOL.md](docs/PROTOCOL.md) · CPU load:
+[docs/CPU_BUDGET.md](docs/CPU_BUDGET.md) · panel details:
 [docs/CONTROLS.md](docs/CONTROLS.md).
-
-## How it works
-
-```
- browser (WebMIDI) ──USB-MIDI SysEx──▶ core 1: TinyUSB, protocol, flash writes
-                                          │  edits → live song (RAM)
-                                          │  commands → lock-free queue
-                                          ▼
-                     core 0, 48 kHz ISR: sequencer → 4 voices → mixer → DACs
-                                          panel, CV/gates, clock, LEDs
-```
-
-* **Protocol:** USB-MIDI SysEx (`F0 7D 54 …`), the same approach as the
-  official ComputerCard `web_interface` example and ~30 released cards.
-  No driver, automatic port detection, works next to a DAW. See
-  [docs/PROTOCOL.md](docs/PROTOCOL.md) and [docs/RESEARCH.md](docs/RESEARCH.md).
-* **Flash:** 6 song slots (33 KB records, 52 KB apart, CRC-checked; slots
-  saved by 0.3.0 and 0.1/0.2 are converted when loaded) in the top of the card's flash, written by core 1 one sector at a time. The firmware runs entirely
-  from RAM (`copy_to_ram`), so audio keeps running while saving.
-* **Feedback:** core 1 sends a Panel report (knob positions, pickup state,
-  macros, effective values, tempo/swing/slot/position) only on change, ≤ 30/s,
-  while the editor is connected.
-* **CPU:** 192 MHz. Engine only, emulator: demo song ≈ 36 % average / 46 %
-  worst sample (with reverb 42 % / 54 %), idle 21 %; a deliberately pathological
-  worst case 76 % / 91 % (with the reverb on all six channels at maximum
-  83 % / 97 %). See
-  [docs/CPU_BUDGET.md](docs/CPU_BUDGET.md). The module reports its measured
-  load to the editor.
-
-## Building
-
-Firmware (Pico SDK 2.2.0, ARM GCC 14):
-
-```sh
-export PICO_SDK_PATH=/path/to/pico-sdk     # with submodules (TinyUSB)
-cmake -S . -B build -G Ninja -DPICO_BOARD=pico -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-cp build/workshop_tracker.uf2 dist/
-```
-
-Tests:
-
-```sh
-# engine, sequencer, panel, protocol and flash-format unit tests (host g++)
-cmake -S . -B build-host -DBUILD_HOST_TESTS=ON && cmake --build build-host && ./build-host/test_engine
-# JS protocol tests + JS↔C++ cross-check (uses build-host/xcheck from the step above)
-node --test web/test/*.test.mjs
-```
-
-CPU benchmark: see [docs/CPU_BUDGET.md](docs/CPU_BUDGET.md).
-
-CI (`.github/workflows/build.yml`) runs the tests, builds the UF2, attaches it
-to tagged releases and deploys `web/` to GitHub Pages (enable Pages with
-source **GitHub Actions** in the repo settings).
-
-## Layout
-
-```
-src/main.cpp              ComputerCard glue, core-1 USB/flash host
-src/engine/*.h            DSP, voices, mixer, sequencer, panel, protocol, flash format (header-only, host-testable)
-src/tusb_config.h, usb_descriptors.c   TinyUSB MIDI device
-vendor/ComputerCard/      ComputerCard v0.4.0 (MIT, Chris Johnson)
-web/                      the editor (plain HTML/CSS/ES modules, no build step)
-tests/                    host unit tests, JS↔C++ cross-check helper
-tools/cpu_bench/          Cortex-M0+ cycle estimate in an emulator
-tools/sound_check/        renders drum hits / the demo song with the engine, compares two versions, writes the WAV demos
-tools/ui-shots/           editor screenshots + layout checks against a fake module (optional, Chrome + puppeteer-core)
-docs/                     protocol, controls, CPU budget, research notes, audio demos
-dist/                     built UF2
-```
-
-## Implemented vs. not (yet)
-
-Implemented: everything listed at the top. Not implemented / limitations:
-
-* one send effect only (the lo-fi reverb, no delay); the reverb has no knob on
-  the panel and no per-step effect letter;
-* USB **device** mode only (no USB-host MIDI keyboards);
-* external clock is fixed at **1 pulse = 1 row** (no PPQN setting);
-* panel decay/colour macros affect new hits, not notes already ringing;
-* the module's knob positions are shown in the editor but can't be moved from it (they are physical);
-* no per-track mute/solo in the grid (use the mixer mute), no undo;
-* song changes from the panel are only possible between the stored slots;
-* ComputerCard's own interrupt overhead is estimated, not measured.
-
-## Known risks
-
-* 0.1 and 0.2 were confirmed on hardware. **0.3** has only been tested in
-  simulation: the IN-track VCAs on real audio, **0.3.2's CV voltages
-  (C0 = 0 V, the octave folding, CV in 1 near the range ends) on real VCOs, the
-  slot-knob zones and their hysteresis with a real pot, the slot LEDs, the
-  editor following a slot change on real USB timing,** the conversion of
-  real 0.2 and 0.3.0 flash slots, the slot writes (9 sectors) while audio runs, the
-  slot-select fix on the panel, and the audio-core timing changes (one
-  ratchet/gate event per sample, mixer/VCA updates postponed on busy samples).
-  Long-term stability at 192 MHz / 1.15 V still needs more hardware time.
-* **0.4.3** is untested on hardware: the click, the morph and grit were only
-  rendered on the host. The CPU cost was measured in the emulator: normal
-  songs (even with click, morph and grit on three voices plus reverb) stay at
-  ≈ 56 % peak, but the synthetic worst case (every voice retriggered on every
-  row, reverb on, **grit on all four voices**) reaches ≈ 105 % of the engine
-  budget at its peaks (≈ 1 % of the samples are over), i.e. it can crackle. With grit off, the worst case
-  is 99.5 % (0.4.2: 98.6 %). If you hear crackles, use grit on fewer voices.
-* **0.4.2** is untested on hardware: the REVERB/MASTER mutes and their
-  fades on real outputs, and the new faceplates were only checked in
-  headless Chrome (1366×768 and 1920×1080, no scrolling) and not in other
-  browsers or on HiDPI screens.
-* **0.4.0/0.4.1** is untested on hardware: the per-step send `W`, the reverb's sound and level on real
-  outputs, its CPU cost next to ComputerCard's own interrupt work, and the
-  audio-core changes (hits start 1 sample after their trigger, Modal 2; events
-  are spread over neighbouring samples, ≤ 7 samples = 0.15 ms in the worst case;
-  voices end once they are below the output resolution; LEDs written one per
-  sample; CV written only when it changes).
-* RAM use is ≈ 70 % (0.3.2: 60 %; the reverb's delay lines take ≈ 17 KB).
-* The pathological CPU worst case is close to the budget (with the reverb at
-  maximum on all channels, single samples reach ≈ 97 % of the engine budget
-  before ComputerCard's overhead); normal songs have plenty of headroom. If you
-  hear clicks, check the CPU readout in the editor and lower the sends/decay.
-* Saving a slot overwrites it. If power fails mid-save, that slot comes back
-  empty (CRC), never corrupt; the other slots are untouched.
-* Requires a Chromium-based browser (WebMIDI with SysEx).
 
 ## License
 
 MIT, see [LICENSE](LICENSE). ComputerCard is MIT © Chris Johnson
-(`vendor/ComputerCard/LICENSE`). TinyUSB config/descriptor files are adapted
-from the ComputerCard `web_interface` example.
+(`vendor/ComputerCard/LICENSE`).

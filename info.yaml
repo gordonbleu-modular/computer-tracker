@@ -124,4 +124,4 @@ host:
   usb:
     - name: USB MIDI device
       role: midi
-      description: Appears as "Workshop Tracker"; the web editor talks to it with SysEx
+      description: Appears as "Workshop Tracker"; the web editor (https://gordonbleu-modular.github.io/computer-tracker/) talks to it with SysEx
