@@ -1,4 +1,4 @@
-# Workshop Tracker
+# Computer Tracker
 
 **▶ [Open the web app](https://gordonbleu-modular.github.io/computer-tracker/)** (Chrome or Edge) · [Download the firmware](https://github.com/gordonbleu-modular/computer-tracker/releases)
 
@@ -17,8 +17,6 @@ A **tracker sequencer with four drum-synth voices** for the
   arrangement, tempo and swing. All values are typed as **00–99**.
 * **Plays without a computer**: 6 song slots in flash, start / next part /
   stop, knob macros, external clock and reset.
-
-Deutsch: [README.de.md](README.de.md)
 
 ![Editor: tracker grid with the keyboard sketch](docs/screenshot-grid-keyboard-1366x768.png)
 

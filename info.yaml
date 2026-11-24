@@ -1,13 +1,22 @@
-draft: true
-Name: Workshop Tracker
+# Computer Tracker – info.yaml für releases/669_computer_tracker/
+draft: false
+Name: Computer Tracker
 short-description: Tracker sequencer with 4 drum synths, 2 CV/gate tracks, 2 audio-in VCA tracks and a WebMIDI editor.
 Language: C++ (Pico SDK + ComputerCard)
-Creator: Workshop Tracker contributors
+Creator: Gordon Bleu
 Version: "0.4.3"
-Status: Experimental (untested on hardware)
+Status: Beta
+License: MIT
 date-created: 2026-11-15
-date-updated: 2026-11-20
-license: MIT
+date-updated: 2026-11-24
+Editor: https://gordonbleu-modular.github.io/computer-tracker/
+repository: https://github.com/gordonbleu-modular/computer-tracker
+discussion: https://discord.com/channels/1210238368898879569/1574702387086622851
+contact:
+  discord: chrischn52
+  social:
+    github: https://github.com/gordonbleu-modular
+    instagram: https://www.instagram.com/gordon_bleu_modular/
 
 tags:
   - sequencer
@@ -15,14 +24,13 @@ tags:
   - drums
   - cv
   - gate
-  - midi
   - web-editor
 
 summary: |
   A tracker sequencer with four on-board drum synth voices (Kick with an optional click, Karplus-Strong pluck, pitched noise, FM metal, modal resonator, a snare that morphs into a clap, and a per-voice lo-fi grit), a stereo mixer (a mute on every strip, the reverb return and the master) with a lo-fi stereo reverb on a send (with a per-step send effect), two CV/gate tracks for the Workshop System VCOs, and two IN tracks that play the VCAs on the audio inputs (where the VCO audio comes back in). Each step has a note, a velocity (drum and IN tracks) and one effect. Songs are edited in a browser (Chrome/Edge) over USB-MIDI SysEx and stored in six flash slots; without a computer the card is played from the panel (slots, next part, macros, external clock and reset).
 
 uf2:
-  - path: dist/workshop_tracker.uf2
+  - path: workshop_tracker.uf2
     name: Workshop Tracker 0.4.3
 
 panel:
